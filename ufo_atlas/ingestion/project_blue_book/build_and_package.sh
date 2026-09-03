@@ -46,11 +46,12 @@ printf '%s\n' "$SOURCE_COMMIT" > build/project_blue_book/SOURCE_REPOSITORY_COMMI
 # every package member is final, then verify it before creating the ZIP.
 (
   cd build/project_blue_book
-  rm -f SHA256SUMS.txt
-  find . -maxdepth 1 -type f -printf '%f\n' \
+  checksum_tmp="$(mktemp)"
+  find . -maxdepth 1 -type f ! -name 'SHA256SUMS.txt' -printf '%f\n' \
     | LC_ALL=C sort \
     | while IFS= read -r file; do sha256sum "$file"; done \
-    > SHA256SUMS.txt
+    > "$checksum_tmp"
+  mv "$checksum_tmp" SHA256SUMS.txt
   sha256sum -c SHA256SUMS.txt
 )
 
