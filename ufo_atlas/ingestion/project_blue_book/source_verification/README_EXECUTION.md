@@ -1,0 +1,1 @@
+Execution is intentionally manual-only. The workflow plans immutable batches from the pinned Project Blue Book PDF trees, downloads each original scan once, extracts available PDF text layers without OCR, compares source form values and derivative transcriptions, records checksums and page-level verification evidence, and aggregates the results for central UFO Atlas ingestion.
