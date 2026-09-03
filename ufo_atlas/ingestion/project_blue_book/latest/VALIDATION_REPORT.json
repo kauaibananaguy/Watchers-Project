@@ -1,0 +1,53 @@
+{
+  "build_version": "0.1.0",
+  "built_at": "2026-09-03T13:44:32Z",
+  "case_source_parity": true,
+  "counts": {
+    "case_events": 58859,
+    "case_records": 10807,
+    "claim_records": 2041,
+    "date_precision": {
+      "DAY": 4777,
+      "MONTH": 5863,
+      "UNKNOWN": 110,
+      "YEAR": 57
+    },
+    "document_records": 10807,
+    "ingestion_issues": 7739,
+    "location_records": 6805,
+    "metadata_values": 410666,
+    "narrative_status": {
+      "MINIMAL_PENDING_SOURCE_VERIFICATION": 1336,
+      "PROVISIONAL_SOURCE_DERIVED": 9471
+    },
+    "relationships": 23655,
+    "source_files": 10807,
+    "source_total_bytes": 123670111
+  },
+  "foreign_key_violations": 0,
+  "fts_parity": true,
+  "gates": {
+    "approved_record_types_only": true,
+    "case_source_parity": true,
+    "duplicate_source_file_pairs": true,
+    "foreign_keys": true,
+    "fts_parity": true,
+    "metadata_decision_parity": true,
+    "no_project_records": true,
+    "required_case_fields_nonblank": true,
+    "sqlite_quick_check": true
+  },
+  "limitations": [
+    "Third-party GPT-assisted transcription of scanned government case files. Accuracy is not guaranteed; values and narratives require comparison with the original scans.",
+    "Automated source-derived classifications and narratives require manual verification against original scans."
+  ],
+  "metadata_actual": 410666,
+  "metadata_expected": 410666,
+  "no_project_records": true,
+  "overall_status": "PASS",
+  "schema_version": "UFO-ATLAS-IMPORT-0.1",
+  "source_manifest_sha256": "763ffaa723c7bcb8eed8b3e78236880ec76f63421831e8360ef793d47463a804",
+  "source_repository": "dansterdam/blue_book_scanner",
+  "source_repository_commit": "53caa32810d60638b82f39e93bae501b4ba7a6a6",
+  "sqlite_quick_check": "ok"
+}

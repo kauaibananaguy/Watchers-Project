@@ -1,0 +1,29 @@
+{
+  "build_version": "0.1.0",
+  "counts": {
+    "case_events": 58859,
+    "case_records": 10807,
+    "claim_records": 2041,
+    "date_precision": {
+      "DAY": 4777,
+      "MONTH": 5863,
+      "UNKNOWN": 110,
+      "YEAR": 57
+    },
+    "document_records": 10807,
+    "ingestion_issues": 7739,
+    "location_records": 6805,
+    "metadata_values": 410666,
+    "narrative_status": {
+      "MINIMAL_PENDING_SOURCE_VERIFICATION": 1336,
+      "PROVISIONAL_SOURCE_DERIVED": 9471
+    },
+    "relationships": 23655,
+    "source_files": 10807,
+    "source_total_bytes": 123670111
+  },
+  "package": "UFO_ATLAS_CENTRAL_IMPORT_PROJECT_BLUE_BOOK",
+  "schema_version": "UFO-ATLAS-IMPORT-0.1",
+  "source_manifest_sha256": "763ffaa723c7bcb8eed8b3e78236880ec76f63421831e8360ef793d47463a804",
+  "source_snapshot_id": "SNAP-PBB-763FFAA723C7BCB8EED8"
+}
