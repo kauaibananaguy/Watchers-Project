@@ -1,0 +1,39 @@
+name: Temporary Hatch source export
+
+on:
+  push:
+    paths:
+      - '.github/workflows/temporary_hatch_source_export.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Download public Hatch source file
+        run: |
+          set -euo pipefail
+          mkdir -p export
+          curl --fail --location --retry 3 --retry-delay 2 \
+            https://raw.githubusercontent.com/richgel999/ufo_data/main/bin/hatch_udb.json \
+            --output export/hatch_udb.json
+          test "$(wc -c < export/hatch_udb.json)" -gt 24000000
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          p = Path('export/hatch_udb.json')
+          with p.open('r', encoding='utf-8-sig') as f:
+              json.load(f)
+          PY
+          sha256sum export/hatch_udb.json > export/SHA256SUMS.txt
+          wc -c export/hatch_udb.json > export/SIZE_BYTES.txt
+      - name: Upload source artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hatch-source-json
+          path: export/
+          if-no-files-found: error
+          retention-days: 1
