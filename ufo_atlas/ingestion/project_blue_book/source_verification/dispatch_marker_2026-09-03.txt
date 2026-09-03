@@ -1,0 +1,1 @@
+Authorized 2026-09-03: run the manual original-scan verification workflow with 900,000,000-byte target batches.
