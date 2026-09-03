@@ -31,6 +31,14 @@ jobs:
           set -euo pipefail
           npm ci
           npm run build
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('bin/index.ts')
+          s=p.read_text(encoding='utf-8')
+          s=s.replace('.option("-db, --database <udb|nuforc> [source]",', '.option("--database <udb|nuforc> [source]",')
+          s=s.replace('.option("-wm, --worldmap [wmFile]",', '.option("--worldmap [wmFile]",')
+          p.write_text(s, encoding='utf-8')
+          PY
           mkdir -p ../export
           npx tsx bin/index.ts \
             --database udb data/udb/input/U.RND \
