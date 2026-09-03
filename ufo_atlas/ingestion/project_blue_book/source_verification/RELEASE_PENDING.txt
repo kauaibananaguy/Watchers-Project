@@ -1,0 +1,1 @@
+Local packages prepared: UFO_ATLAS_GMR_PROFILE_v1.0.0.zip; UFO_ATLAS_PROJECT_BLUE_BOOK_ENRICHED_v0.2.0.zip; UFO_ATLAS_PROJECT_BLUE_BOOK_ENRICHED_v0.2.1.zip. Publication as a durable release remains pending.
