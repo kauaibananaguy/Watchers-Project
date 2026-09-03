@@ -1,0 +1,111 @@
+name: Verify Project Blue Book original scans (one-time)
+
+on:
+  push:
+    paths:
+      - '.github/workflows/verify_project_blue_book_scans_once.yml'
+
+concurrency:
+  group: project-blue-book-original-scan-verification
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUNBUFFERED: '1'
+  TARGET_BYTES: '900000000'
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - id: plan
+        name: Build immutable scan-verification plan
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python ufo_atlas/ingestion/project_blue_book/source_verification/verify_scans.py plan \
+            --target-bytes "$TARGET_BYTES" \
+            --output matrix.json \
+            --census scan_census.json
+          echo "matrix=$(cat matrix.json)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pbb-scan-verification-plan
+          path: |
+            matrix.json
+            scan_census.json
+          if-no-files-found: error
+          retention-days: 90
+
+  verify:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install PDF text-layer reader
+        run: python -m pip install --disable-pip-version-check --no-cache-dir 'pypdf>=6,<7'
+      - name: Verify batch against original PDFs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p "verification/${{ matrix.decade }}-${{ matrix.batch_index }}"
+          python ufo_atlas/ingestion/project_blue_book/source_verification/verify_scans.py verify \
+            --decade '${{ matrix.decade }}' \
+            --batch-index '${{ matrix.batch_index }}' \
+            --target-bytes '${{ matrix.target_bytes }}' \
+            --scan-revision '${{ matrix.scan_revision }}' \
+            --output-dir "verification/${{ matrix.decade }}-${{ matrix.batch_index }}"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pbb-scan-${{ matrix.decade }}-${{ matrix.batch_index }}
+          path: verification/${{ matrix.decade }}-${{ matrix.batch_index }}/
+          if-no-files-found: warn
+          compression-level: 6
+          retention-days: 90
+
+  aggregate:
+    needs: [plan, verify]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: pbb-scan-*
+          path: batch-results
+          merge-multiple: false
+      - name: Aggregate verification evidence
+        run: |
+          mkdir -p aggregate
+          python ufo_atlas/ingestion/project_blue_book/source_verification/verify_scans.py aggregate \
+            --input-dir batch-results \
+            --output-dir aggregate
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PROJECT_BLUE_BOOK_ORIGINAL_SCAN_VERIFICATION
+          path: aggregate/
+          if-no-files-found: error
+          compression-level: 6
+          retention-days: 90
