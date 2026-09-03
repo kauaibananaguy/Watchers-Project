@@ -1,0 +1,119 @@
+name: Capture Project Blue Book scan verification completion
+
+on:
+  workflow_run:
+    workflows:
+      - 'Verify Project Blue Book original scans (one-time)'
+    types:
+      - completed
+
+permissions:
+  actions: read
+  contents: write
+
+env:
+  PYTHONUNBUFFERED: '1'
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Record triggering run
+        env:
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          mkdir -p ufo_atlas/ingestion/project_blue_book/source_verification/latest
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          payload = {
+              'workflow_run_id': int(os.environ['RUN_ID']),
+              'workflow_conclusion': os.environ['RUN_CONCLUSION'],
+              'workflow_url': os.environ['RUN_URL'],
+              'workflow_head_sha': os.environ['RUN_HEAD_SHA'],
+          }
+          Path('ufo_atlas/ingestion/project_blue_book/source_verification/latest/WORKFLOW_RUN.json').write_text(
+              json.dumps(payload, indent=2) + '\n', encoding='utf-8'
+          )
+          PY
+      - name: Download and verify aggregate artifact
+        if: ${{ github.event.workflow_run.conclusion == 'success' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          python - <<'PY'
+          import json, os, subprocess
+          from pathlib import Path
+          repo = os.environ['GITHUB_REPOSITORY']
+          run_id = os.environ['RUN_ID']
+          raw = subprocess.check_output([
+              'gh','api',f'repos/{repo}/actions/runs/{run_id}/artifacts','--paginate'
+          ], text=True)
+          payload = json.loads(raw)
+          artifacts = payload.get('artifacts', []) if isinstance(payload, dict) else []
+          matches = [a for a in artifacts if a.get('name') == 'PROJECT_BLUE_BOOK_ORIGINAL_SCAN_VERIFICATION']
+          if len(matches) != 1:
+              raise SystemExit(f'Expected one aggregate artifact, found {len(matches)}')
+          artifact = matches[0]
+          Path('/tmp/artifact_id.txt').write_text(str(artifact['id']), encoding='utf-8')
+          Path('ufo_atlas/ingestion/project_blue_book/source_verification/latest/ARTIFACT.json').write_text(
+              json.dumps(artifact, indent=2) + '\n', encoding='utf-8'
+          )
+          PY
+          ARTIFACT_ID="$(cat /tmp/artifact_id.txt)"
+          curl --fail --location \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${ARTIFACT_ID}/zip" \
+            --output /tmp/aggregate.zip
+          mkdir -p /tmp/aggregate
+          unzip -q /tmp/aggregate.zip -d /tmp/aggregate
+          python - <<'PY'
+          import hashlib, json, shutil, sqlite3
+          from pathlib import Path
+          src = Path('/tmp/aggregate')
+          latest = Path('ufo_atlas/ingestion/project_blue_book/source_verification/latest')
+          summary = json.loads((src/'SUMMARY.json').read_text(encoding='utf-8'))
+          db = src/'PROJECT_BLUE_BOOK_SCAN_VERIFICATION_RESULTS.sqlite'
+          con = sqlite3.connect(db)
+          quick = con.execute('PRAGMA quick_check').fetchone()[0]
+          fk = len(con.execute('PRAGMA foreign_key_check').fetchall())
+          con.close()
+          if quick != 'ok' or fk:
+              raise SystemExit(f'Aggregate validation failed: quick={quick}, fk={fk}')
+          for name in ['SUMMARY.json','SHA256SUMS.txt']:
+              shutil.copy2(src/name, latest/name)
+          evidence = {
+              'aggregate_zip_sha256': hashlib.sha256(Path('/tmp/aggregate.zip').read_bytes()).hexdigest(),
+              'sqlite_quick_check': quick,
+              'foreign_key_violations': fk,
+              'summary': summary,
+          }
+          (latest/'AGGREGATE_VALIDATION.json').write_text(json.dumps(evidence, indent=2)+'\n', encoding='utf-8')
+          PY
+      - name: Record failed scan workflow
+        if: ${{ github.event.workflow_run.conclusion != 'success' }}
+        env:
+          RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+        run: |
+          printf 'Original-scan verification did not complete successfully: %s\n' "$RUN_CONCLUSION" > \
+            ufo_atlas/ingestion/project_blue_book/source_verification/latest/FAILURE.txt
+      - name: Commit preserved completion evidence
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add ufo_atlas/ingestion/project_blue_book/source_verification/latest
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m 'Preserve Project Blue Book scan-verification result [skip ci]'
+          git push
