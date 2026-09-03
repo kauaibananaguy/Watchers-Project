@@ -11,18 +11,17 @@ permissions:
 jobs:
   export:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - name: Check out public UFO data repository
-        uses: actions/checkout@v4
-        with:
-          repository: richgel999/ufo_data
-          ref: main
-          path: source
-      - name: Prepare source artifact
+      - name: Download public NICAP source file
         run: |
           set -euo pipefail
           mkdir -p export
-          cp source/bin/nicap_db.json export/nicap_db.json
+          curl --fail --location --retry 3 --retry-delay 2 \
+            https://raw.githubusercontent.com/richgel999/ufo_data/main/bin/nicap_db.json \
+            --output export/nicap_db.json
+          test "$(wc -c < export/nicap_db.json)" -gt 2500000
+          python -m json.tool export/nicap_db.json >/dev/null
           sha256sum export/nicap_db.json > export/SHA256SUMS.txt
           wc -c export/nicap_db.json > export/SIZE_BYTES.txt
       - name: Upload source artifact
@@ -31,4 +30,5 @@ jobs:
           name: nicap-source-json
           path: export/
           if-no-files-found: error
+          compression-level: 0
           retention-days: 1
