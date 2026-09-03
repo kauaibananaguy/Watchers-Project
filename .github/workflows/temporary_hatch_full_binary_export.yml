@@ -25,11 +25,12 @@ jobs:
           node-version: '22'
           cache: npm
           cache-dependency-path: udb/package-lock.json
-      - name: Install and export every binary record
+      - name: Install, build, and export every binary record
         working-directory: udb
         run: |
           set -euo pipefail
           npm ci
+          npm run build
           mkdir -p ../export
           npx tsx bin/index.ts \
             --database udb data/udb/input/U.RND \
