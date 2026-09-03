@@ -1,0 +1,45 @@
+name: Build Project Blue Book central UFO Atlas import
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/build_project_blue_book_central_import.yml'
+      - 'ufo_atlas/ingestion/project_blue_book/**'
+
+concurrency:
+  group: project-blue-book-central-import
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Reconstruct verified builder
+        run: bash ufo_atlas/ingestion/project_blue_book/reconstruct_builder.sh
+      - name: Acquire full source corpus
+        run: bash ufo_atlas/ingestion/project_blue_book/acquire_source.sh
+      - name: Build and validate central import
+        run: bash ufo_atlas/ingestion/project_blue_book/build_and_package.sh
+      - name: Upload complete database package
+        uses: actions/upload-artifact@v4
+        with:
+          name: UFO_ATLAS_CENTRAL_IMPORT_PROJECT_BLUE_BOOK_v0.1.0
+          path: |
+            build/UFO_ATLAS_CENTRAL_IMPORT_PROJECT_BLUE_BOOK_v0.1.0.zip
+            build/UFO_ATLAS_CENTRAL_IMPORT_PROJECT_BLUE_BOOK_v0.1.0.zip.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 90
+      - name: Publish compact validation evidence
+        run: bash ufo_atlas/ingestion/project_blue_book/publish_build_evidence.sh
