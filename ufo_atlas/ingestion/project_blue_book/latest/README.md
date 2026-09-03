@@ -3,7 +3,7 @@
 Build version: 0.1.0  
 Schema profile: UFO-ATLAS-IMPORT-0.1  
 Source repository commit: 53caa32810d60638b82f39e93bae501b4ba7a6a6  
-Built: 2026-09-03T13:44:32Z
+Built: 2026-09-03T14:20:55Z
 
 This package is a **source-neutral UFO Atlas import database**. It does not create a separate Project Blue Book project hierarchy. Each source file produces a `Case/Incident` entry, a linked `Document` entry, and a normalized `Location` entry where a place can be recovered. Project Blue Book is represented only in document source/provenance, external identifiers, and attributed source dispositions.
 
