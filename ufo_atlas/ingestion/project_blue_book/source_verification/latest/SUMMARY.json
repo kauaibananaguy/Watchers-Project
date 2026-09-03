@@ -1,0 +1,16 @@
+{
+  "documents": 10808,
+  "pages": 115979,
+  "field_comparisons": 28263,
+  "downloaded_bytes": 22768496003,
+  "verification_status_counts": {
+    "TEXT_LAYER_LOW_MATCH": 10336,
+    "IMAGE_ONLY_REQUIRES_VISUAL_OR_OCR": 58,
+    "TEXT_LAYER_PARTIAL_MATCH": 411,
+    "DOWNLOAD_OR_PDF_READ_ERROR": 1,
+    "TEXT_LAYER_STRONG_MATCH": 2
+  },
+  "sqlite_quick_check": "ok",
+  "foreign_key_violations": 0,
+  "source_policy": "Original scan controls. No OCR was used; image-only pages remain explicitly unverified."
+}
