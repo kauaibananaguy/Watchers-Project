@@ -1,0 +1,1 @@
+Authorized by user to run the manual original-scan verification workflow and continue autonomously unless a genuine blocker arises.
