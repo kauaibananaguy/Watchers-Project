@@ -1,0 +1,3 @@
+Manual workflow: .github/workflows/verify_project_blue_book_scans.yml
+Default target batch size: 900000000 bytes
+Policy: no OCR; image-only pages are explicitly remanded.
