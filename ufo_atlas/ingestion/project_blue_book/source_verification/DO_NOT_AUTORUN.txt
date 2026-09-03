@@ -1,0 +1,1 @@
+This pipeline must remain workflow_dispatch-only to prevent accidental 21 GB source-verification reruns.
