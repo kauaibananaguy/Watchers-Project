@@ -28,6 +28,7 @@ python - "$DB" <<'PY'
 import sqlite3, sys
 con = sqlite3.connect(sys.argv[1])
 assert con.execute('PRAGMA quick_check').fetchone()[0] == 'ok'
+assert con.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
 assert con.execute('PRAGMA foreign_key_check').fetchall() == []
 assert con.execute("SELECT count(*) FROM records WHERE record_type='Investigation/Project'").fetchone()[0] == 0
 cases = con.execute("SELECT count(*) FROM records WHERE record_type='Case/Incident'").fetchone()[0]
@@ -39,6 +40,20 @@ print(f'Acceptance gate verified for {cases:,} source cases.')
 PY
 
 printf '%s\n' "$SOURCE_COMMIT" > build/project_blue_book/SOURCE_REPOSITORY_COMMIT.txt
+
+# The builder writes its checksum ledger before tee finishes BUILD_RUN_REPORT.json
+# and before SOURCE_REPOSITORY_COMMIT.txt exists. Rebuild the ledger only after
+# every package member is final, then verify it before creating the ZIP.
+(
+  cd build/project_blue_book
+  rm -f SHA256SUMS.txt
+  find . -maxdepth 1 -type f -printf '%f\n' \
+    | LC_ALL=C sort \
+    | while IFS= read -r file; do sha256sum "$file"; done \
+    > SHA256SUMS.txt
+  sha256sum -c SHA256SUMS.txt
+)
+
 (
   cd build
   zip -q -r -9 UFO_ATLAS_CENTRAL_IMPORT_PROJECT_BLUE_BOOK_v0.1.0.zip project_blue_book
