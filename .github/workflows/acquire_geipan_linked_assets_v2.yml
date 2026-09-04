@@ -1,0 +1,218 @@
+name: Acquire GEIPAN linked case assets v2
+
+on:
+  workflow_run:
+    workflows:
+      - 'Repair GEIPAN case page remands'
+    types:
+      - completed
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: Successful repaired-case-page run ID; blank uses latest successful run
+        required: false
+        default: ''
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: geipan-linked-asset-acquisition-v2
+  cancel-in-progress: false
+
+env:
+  PYTHONUNBUFFERED: '1'
+  ASSET_BATCH_SIZE: '40'
+
+jobs:
+  plan:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      expected_assets: ${{ steps.plan.outputs.expected_assets }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Resolve and download repaired case-page artifact
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_RUN_ID: ${{ github.event.workflow_run.id }}
+          INPUT_RUN_ID: ${{ inputs.source_run_id }}
+        run: |
+          set -euo pipefail
+          RUN_ID="${INPUT_RUN_ID:-${EVENT_RUN_ID:-}}"
+          if [ -z "$RUN_ID" ]; then
+            RUN_ID="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/repair_geipan_case_pages.yml/runs?status=success&per_page=1" --jq '.workflow_runs[0].id')"
+          fi
+          test -n "$RUN_ID"
+          ARTIFACT_ID="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/artifacts?per_page=100" --jq '.artifacts[] | select(.name=="GEIPAN_CASE_PAGE_SOURCE_SNAPSHOT_v0.2.1_REPAIRED") | .id' | head -1)"
+          test -n "$ARTIFACT_ID"
+          curl --fail --location \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${ARTIFACT_ID}/zip" \
+            --output case-page-artifact.zip
+          mkdir -p case-page-artifact case-page-snapshot
+          unzip -q case-page-artifact.zip -d case-page-artifact
+          INNER="$(find case-page-artifact -type f -name 'GEIPAN_CASE_PAGE_SOURCE_SNAPSHOT_v0.2.1_REPAIRED.zip' -print -quit)"
+          test -n "$INNER"
+          unzip -q "$INNER" -d case-page-snapshot
+          # The asset planner expects the v0.2.0 logical database filename.
+          DB="$(find case-page-snapshot -type f -name 'GEIPAN_CASE_PAGE_SOURCE_SNAPSHOT_v0.2.1_REPAIRED.sqlite' -print -quit)"
+          test -n "$DB"
+          cp "$DB" "$(dirname "$DB")/GEIPAN_CASE_PAGE_SOURCE_SNAPSHOT_v0.2.0.sqlite"
+      - id: plan
+        name: Build deduplicated linked-asset acquisition plan
+        run: |
+          mkdir -p plan
+          python ufo_atlas/ingestion/geipan/crawl_assets_v1.py plan \
+            --case-page-snapshot case-page-snapshot \
+            --output-dir plan \
+            --batch-size "$ASSET_BATCH_SIZE"
+          echo "matrix=$(cat plan/matrix.json)" >> "$GITHUB_OUTPUT"
+          echo "expected_assets=$(python -c 'import json; print(json.load(open("plan/PLAN_SUMMARY.json"))["unique_asset_urls"])')" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: geipan-linked-asset-v2-plan
+          path: plan/
+          if-no-files-found: error
+          retention-days: 90
+
+  acquire:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install asset readers
+        run: >-
+          python -m pip install --disable-pip-version-check --no-cache-dir
+          'pypdf>=6,<7' 'Pillow>=11,<13' 'openpyxl>=3.1,<4' 'python-docx>=1.1,<2'
+      - uses: actions/download-artifact@v4
+        with:
+          name: geipan-linked-asset-v2-plan
+          path: plan
+      - id: names
+        shell: bash
+        run: |
+          printf -v PAD '%04d' '${{ matrix.batch_index }}'
+          echo "pad=${PAD}" >> "$GITHUB_OUTPUT"
+          echo "raw_shard=geipan-asset-v2-batch-${PAD}" >> "$GITHUB_OUTPUT"
+          echo "metadata_shard=geipan-asset-v2-metadata-${PAD}" >> "$GITHUB_OUTPUT"
+      - name: Acquire and extract all linked source assets
+        run: |
+          OUT="asset-batch-${{ steps.names.outputs.pad }}"
+          python ufo_atlas/ingestion/geipan/crawl_assets_v1.py acquire \
+            --assets plan/assets.json \
+            --batch-index '${{ matrix.batch_index }}' \
+            --start '${{ matrix.start }}' \
+            --end '${{ matrix.end }}' \
+            --output-dir "$OUT" \
+            --delay-seconds 5.0 \
+            --retries 10 \
+            --max-asset-bytes 1000000000 \
+            --max-batch-bytes 4000000000
+          find "$OUT/blobs" -type f -print0 | sort -z | xargs -0 -r sha256sum > "$OUT/RAW_ASSET_SHARD_MANIFEST.txt"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ${{ steps.names.outputs.raw_shard }}
+          path: |
+            asset-batch-${{ steps.names.outputs.pad }}/blobs/
+            asset-batch-${{ steps.names.outputs.pad }}/RAW_ASSET_SHARD_MANIFEST.txt
+          if-no-files-found: warn
+          compression-level: 6
+          retention-days: 90
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ${{ steps.names.outputs.metadata_shard }}
+          path: |
+            asset-batch-${{ steps.names.outputs.pad }}/*.sqlite
+            asset-batch-${{ steps.names.outputs.pad }}/BATCH_SUMMARY.json
+            asset-batch-${{ steps.names.outputs.pad }}/SHA256SUMS.txt
+            asset-batch-${{ steps.names.outputs.pad }}/RAW_ASSET_SHARD_MANIFEST.txt
+          if-no-files-found: warn
+          compression-level: 6
+          retention-days: 90
+
+  aggregate:
+    needs: [plan, acquire]
+    if: always() && needs.plan.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: geipan-asset-v2-metadata-*
+          path: metadata-shards
+          merge-multiple: false
+      - name: Aggregate and validate linked-asset metadata and text
+        run: |
+          mkdir -p aggregate
+          python ufo_atlas/ingestion/geipan/crawl_assets_v1.py aggregate \
+            --input-dir metadata-shards \
+            --output-dir aggregate \
+            --expected-assets '${{ needs.plan.outputs.expected_assets }}'
+          (cd aggregate && zip -q -r ../GEIPAN_LINKED_ASSET_METADATA_AND_TEXT_v0.1.1_REPAIRED_PAGES.zip .)
+          sha256sum GEIPAN_LINKED_ASSET_METADATA_AND_TEXT_v0.1.1_REPAIRED_PAGES.zip > \
+            GEIPAN_LINKED_ASSET_METADATA_AND_TEXT_v0.1.1_REPAIRED_PAGES.zip.sha256
+          unzip -t GEIPAN_LINKED_ASSET_METADATA_AND_TEXT_v0.1.1_REPAIRED_PAGES.zip >/dev/null
+      - name: Record raw shard artifact identities
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100" > all-artifacts.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          payload=json.load(open('all-artifacts.json'))
+          artifacts=payload.get('artifacts',[]) if isinstance(payload,dict) else []
+          shards=[a for a in artifacts if str(a.get('name','')).startswith('geipan-asset-v2-batch-')]
+          Path('aggregate/RAW_ASSET_SHARD_ARTIFACTS.json').write_text(json.dumps(shards,indent=2)+'\n',encoding='utf-8')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GEIPAN_LINKED_ASSET_METADATA_AND_TEXT_v0.1.1_REPAIRED_PAGES
+          path: |
+            GEIPAN_LINKED_ASSET_METADATA_AND_TEXT_v0.1.1_REPAIRED_PAGES.zip
+            GEIPAN_LINKED_ASSET_METADATA_AND_TEXT_v0.1.1_REPAIRED_PAGES.zip.sha256
+            aggregate/RAW_ASSET_SHARD_ARTIFACTS.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 90
+      - name: Preserve compact linked-asset v2 evidence
+        run: |
+          set -euo pipefail
+          mkdir -p ufo_atlas/ingestion/geipan/assets_v2_latest
+          cp aggregate/SUMMARY.json ufo_atlas/ingestion/geipan/assets_v2_latest/
+          cp aggregate/ASSET_INDEX.csv ufo_atlas/ingestion/geipan/assets_v2_latest/
+          cp aggregate/RAW_ASSET_SHARD_ARTIFACTS.json ufo_atlas/ingestion/geipan/assets_v2_latest/
+          cp GEIPAN_LINKED_ASSET_METADATA_AND_TEXT_v0.1.1_REPAIRED_PAGES.zip.sha256 \
+            ufo_atlas/ingestion/geipan/assets_v2_latest/PACKAGE_SHA256.txt
+          printf '%s\n' "${GITHUB_RUN_ID}" > ufo_atlas/ingestion/geipan/assets_v2_latest/WORKFLOW_RUN_ID.txt
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add ufo_atlas/ingestion/geipan/assets_v2_latest
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m 'Preserve repaired-page GEIPAN linked-asset evidence [skip ci]'
+          git push
