@@ -1,0 +1,53 @@
+name: Temporary LAC UFO pagination debug
+
+on:
+  push:
+    paths:
+      - '.github/workflows/temporary_lac_ufo_pagination_debug.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Test LAC pagination parameters
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet beautifulsoup4 requests
+          mkdir -p export
+          python - <<'PY'
+          import json
+          import requests
+          from bs4 import BeautifulSoup
+          BASE='https://www.collectionscanada.gc.ca/databases/ufo/'
+          s=requests.Session(); s.headers['User-Agent']='Mozilla/5.0 (compatible; WatchersProjectResearch/1.0)'
+          first=s.get(BASE+'001057-100.01-e.php',timeout=60); first.raise_for_status()
+          soup=BeautifulSoup(first.content,'html.parser'); tag=soup.find('input',{'name':'PHPSESSID'}); sid=tag.get('value') if tag else None
+          tests=[]
+          variants=[
+              ('interval50',{'q7':'Department of National Defence','interval':'50'}),
+              ('browse_blank',{'q7':'Department of National Defence','brws_s':''}),
+              ('browse_submit',{'q7':'Department of National Defence','brws_s':'Submit'}),
+              ('q7_only',{'q7':'Department of National Defence'}),
+          ]
+          for variant,base_params in variants:
+              for sk in [1,2,11,21,31,41,51,52,61,91,101,151,501,931,951]:
+                  params=dict(base_params); params['sk']=str(sk)
+                  if sid: params['PHPSESSID']=sid
+                  r=s.get(BASE+'001057-110.01-e.php',params=params,timeout=90)
+                  sp=BeautifulSoup(r.content,'html.parser')
+                  ids=[a.get_text(' ',strip=True) for a in sp.select('div.alt_data4 a[href]')]
+                  nexts=[a.get('href') for a in sp.find_all('a',href=True) if a.get_text(' ',strip=True).lower()=='next']
+                  tests.append({'variant':variant,'sk':sk,'status':r.status_code,'bytes':len(r.content),'count':len(ids),'first_ids':ids[:5],'last_ids':ids[-5:],'next_links':nexts[:2],'url':r.url})
+          open('export/pagination_debug.json','w',encoding='utf-8').write(json.dumps({'sid':sid,'tests':tests},indent=2))
+          PY
+      - name: Upload debug artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lac-ufo-pagination-debug
+          path: export/
+          if-no-files-found: error
+          retention-days: 1
