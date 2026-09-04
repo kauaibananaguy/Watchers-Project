@@ -1,0 +1,49 @@
+name: Temporary LAC UFO portal probe
+
+on:
+  push:
+    paths:
+      - '.github/workflows/temporary_lac_ufo_portal_probe.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Fetch portal pages
+        run: |
+          set -euo pipefail
+          mkdir -p export
+          base='https://www.collectionscanada.gc.ca/databases/ufo'
+          curl --fail --location --retry 3 --user-agent 'Mozilla/5.0' "$base/001057-100.01-e.php" -o export/search.html
+          curl --fail --location --retry 3 --user-agent 'Mozilla/5.0' "$base/001057-110.01-e.php?brws_s=&q7=Department+of+National+Defence&sk=0" -o export/dnd_results_0.html
+          curl --fail --location --retry 3 --user-agent 'Mozilla/5.0' "$base/001057-119.01-e.php?interval=&isn_id_nbr=37024&record_id=37024-9281-6945" -o export/item_37024-9281-6945.html
+          python - <<'PY'
+          from pathlib import Path
+          from bs4 import BeautifulSoup
+          import json, re
+          out={}
+          for p in Path('export').glob('*.html'):
+              b=p.read_bytes()
+              enc='latin-1'
+              text=b.decode(enc,errors='replace')
+              soup=BeautifulSoup(text,'html.parser')
+              out[p.name]={
+                  'bytes':len(b),
+                  'title':soup.title.get_text(' ',strip=True) if soup.title else None,
+                  'forms':[{'action':f.get('action'),'method':f.get('method'),'inputs':[{'name':i.get('name'),'value':i.get('value'),'type':i.get('type')} for i in f.find_all(['input','select'])]} for f in soup.find_all('form')],
+                  'links':[{'text':a.get_text(' ',strip=True),'href':a.get('href')} for a in soup.find_all('a') if a.get('href')][:200],
+              }
+          Path('export/probe_summary.json').write_text(json.dumps(out,indent=2),encoding='utf-8')
+          PY
+          sha256sum export/* > export/SHA256SUMS.txt
+      - name: Upload probe artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lac-ufo-portal-probe
+          path: export/
+          if-no-files-found: error
+          retention-days: 1
