@@ -4,7 +4,6 @@ on:
   push:
     paths:
       - '.github/workflows/temporary_lac_ufo_full_scan_ocr.yml'
-      - 'scripts/lac_ufo_scan_ocr.py'
 
 permissions:
   contents: read
@@ -40,14 +39,11 @@ jobs:
         env:
           CHUNK: ${{ matrix.chunk }}
           CHUNK_COUNT: 8
-          WORKERS: 2
-          METADATA_DIR: metadata
-          OUTPUT_DIR: output
           OMP_THREAD_LIMIT: 1
           OMP_NUM_THREADS: 1
         run: |
           set -euo pipefail
-          python scripts/lac_ufo_scan_ocr.py
+          python tools/lac_scan_worker.py --metadata-root metadata --output output --chunk "$CHUNK" --chunk-count "$CHUNK_COUNT"
           sha256sum output/* > output/SHA256SUMS.txt
       - name: Upload scan/OCR partition
         uses: actions/upload-artifact@v4
