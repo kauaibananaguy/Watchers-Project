@@ -1,0 +1,272 @@
+name: Temporary LAC UFO full source index
+
+on:
+  push:
+    paths:
+      - '.github/workflows/temporary_lac_ufo_full_source_index.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  acquire:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Build complete source index
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet requests beautifulsoup4
+          mkdir -p export
+          cat > /tmp/acquire_lac_ufo.py <<'PY'
+          from __future__ import annotations
+          import csv, hashlib, json, re, sys, time
+          from concurrent.futures import ThreadPoolExecutor, as_completed
+          from pathlib import Path
+          from urllib.parse import parse_qs, quote_plus, urlencode, urljoin, urlsplit, urlunsplit
+          import requests
+          from bs4 import BeautifulSoup
+
+          BASE='https://www.collectionscanada.gc.ca/databases/ufo/'
+          GROUPS=[
+              'Department of National Defence',
+              'Department of Transport',
+              'National Research Council',
+              'Royal Canadian Mounted Police',
+          ]
+          OUT=Path('export')
+          UA='Mozilla/5.0 (compatible; WatchersProject-UFOAtlas/1.0; archival research)'
+
+          def clean_space(value):
+              return re.sub(r'\s+',' ',value or '').strip()
+
+          def clean_url(url):
+              parts=urlsplit(url)
+              pairs=[]
+              for piece in parts.query.replace('&&','&').split('&'):
+                  if not piece or piece.startswith('PHPSESSID='):
+                      continue
+                  pairs.append(piece)
+              return urlunsplit((parts.scheme,parts.netloc,parts.path,'&'.join(pairs),''))
+
+          session=requests.Session()
+          session.headers.update({'User-Agent':UA})
+
+          def fetch(url, attempts=5):
+              last=None
+              for attempt in range(attempts):
+                  try:
+                      r=session.get(url,timeout=60)
+                      r.raise_for_status()
+                      return r.content
+                  except Exception as exc:
+                      last=exc
+                      time.sleep(min(8,1.5*(attempt+1)))
+              raise RuntimeError(f'Failed after {attempts} attempts: {url}: {last}')
+
+          records=[]
+          listing_page_count=0
+          for group_index, group in enumerate(GROUPS,1):
+              url=f'{BASE}001057-110.01-e.php?brws_s=&q7={quote_plus(group)}&sk=0&interval=50'
+              seen_urls=set()
+              group_sequence=0
+              while url:
+                  url=clean_url(url)
+                  if url in seen_urls:
+                      raise RuntimeError(f'Pagination loop for {group}: {url}')
+                  seen_urls.add(url)
+                  html=fetch(url).decode('latin-1',errors='replace')
+                  soup=BeautifulSoup(html,'html.parser')
+                  page_found=0
+                  for table in soup.select('table.data_table'):
+                      rg_node=table.find(string=re.compile(r'Record Group\s*:'))
+                      dt_node=table.find(string=re.compile(r'Document Title\s*:'))
+                      record_group=group
+                      document_title=''
+                      if rg_node and rg_node.parent:
+                          record_group=clean_space(rg_node.parent.parent.get_text(' ',strip=True).split(':',1)[-1])
+                      if dt_node and dt_node.parent:
+                          document_title=clean_space(dt_node.parent.parent.get_text(' ',strip=True).split(':',1)[-1])
+                      for block in table.select('div.alt_data_container'):
+                          link=block.select_one('div.alt_data4 a')
+                          if not link:
+                              continue
+                          location=clean_space((block.select_one('div.alt_data1') or {}).get_text(' ',strip=True) if block.select_one('div.alt_data1') else '')
+                          sighting_date=clean_space((block.select_one('div.alt_data2') or {}).get_text(' ',strip=True) if block.select_one('div.alt_data2') else '')
+                          document_date=clean_space((block.select_one('div.alt_data3') or {}).get_text(' ',strip=True) if block.select_one('div.alt_data3') else '')
+                          portal_record_id=clean_space(link.get_text(' ',strip=True))
+                          item_url=clean_url(urljoin(url,link.get('href')))
+                          q=parse_qs(urlsplit(item_url).query)
+                          isn=(q.get('isn_id_nbr') or [''])[0]
+                          page=(q.get('page_id_nbr') or [''])[0]
+                          interval=(q.get('interval') or [''])[0]
+                          group_sequence+=1
+                          records.append({
+                              'source_sequence':len(records)+1,
+                              'source_group_sequence':group_sequence,
+                              'record_group_sequence':group_index,
+                              'source_record_id':f'LAC-UFO-{portal_record_id}',
+                              'portal_record_id':portal_record_id,
+                              'record_group':record_group,
+                              'document_title':document_title,
+                              'original_location_text':'' if location.lower()=='[no location cited]' else location,
+                              'original_sighting_date_text':'' if sighting_date.lower()=='[no date cited]' else sighting_date,
+                              'document_date':'' if document_date.lower()=='[no date cited]' else document_date,
+                              'isn_id_nbr':isn,
+                              'page_id_nbr':page,
+                              'result_page_url':url,
+                              'item_url':item_url,
+                              'image_view_url':clean_url(f'{BASE}001057-119.02-e.php?isn_id_nbr={isn}&page_id_nbr={page}&record_id={portal_record_id}&interval={interval}'),
+                          })
+                          page_found+=1
+                  listing_page_count+=1
+                  next_link=None
+                  for a in soup.find_all('a'):
+                      if clean_space(a.get_text(' ',strip=True)).lower()=='next':
+                          href=a.get('href')
+                          if href:
+                              next_link=clean_url(urljoin(url,href))
+                              break
+                  print(f'{group}: listing page {len(seen_urls)}; rows this page={page_found}; total group rows={group_sequence}',flush=True)
+                  url=next_link
+              print(f'COMPLETED {group}: {group_sequence} rows across {len(seen_urls)} pages',flush=True)
+
+          # Preserve source order, and fail on duplicate portal IDs.
+          ids=[r['portal_record_id'] for r in records]
+          if len(ids)!=len(set(ids)):
+              dup=sorted({x for x in ids if ids.count(x)>1})[:20]
+              raise RuntimeError(f'Duplicate portal record IDs: {dup}')
+
+          thread_local={}
+          def scan_url_for(record):
+              # Separate short-lived session per task avoids shared connection-state problems.
+              s=requests.Session(); s.headers.update({'User-Agent':UA})
+              last=''
+              for attempt in range(5):
+                  try:
+                      resp=s.get(record['image_view_url'],timeout=60)
+                      resp.raise_for_status()
+                      soup=BeautifulSoup(resp.content.decode('latin-1',errors='replace'),'html.parser')
+                      candidates=[]
+                      for tag in soup.find_all(['img','a']):
+                          value=tag.get('src') or tag.get('href')
+                          if value and 'data2.collectionscanada.gc.ca' in value and re.search(r'\.(?:jpe?g|png|tif?f)(?:\?|$)',value,re.I):
+                              candidates.append(value)
+                      if not candidates:
+                          raise RuntimeError('No scan-image URL found')
+                      return record['portal_record_id'], clean_url(urljoin(record['image_view_url'],candidates[0])), ''
+                  except Exception as exc:
+                      last=str(exc)
+                      time.sleep(min(6,1.0*(attempt+1)))
+              return record['portal_record_id'],'',last
+
+          scan_results={}
+          with ThreadPoolExecutor(max_workers=12) as executor:
+              futures=[executor.submit(scan_url_for,r) for r in records]
+              completed=0
+              for future in as_completed(futures):
+                  rid,scan,error=future.result()
+                  scan_results[rid]=(scan,error)
+                  completed+=1
+                  if completed%250==0 or completed==len(records):
+                      print(f'Resolved scan URLs {completed}/{len(records)}',flush=True)
+
+          errors=[]
+          for r in records:
+              scan,error=scan_results.get(r['portal_record_id'],('','missing task result'))
+              r['scan_image_url']=scan
+              r['scan_url_status']='RESOLVED' if scan else 'UNRESOLVED'
+              r['scan_url_error']=error
+              r['source_attributes_json']=json.dumps({
+                  'record_group':r['record_group'],
+                  'document_title':r['document_title'],
+                  'document_date':r['document_date'],
+                  'portal_record_id':r['portal_record_id'],
+                  'isn_id_nbr':r['isn_id_nbr'],
+                  'page_id_nbr':r['page_id_nbr'],
+                  'item_url':r['item_url'],
+                  'image_view_url':r['image_view_url'],
+                  'scan_image_url':scan,
+              },ensure_ascii=False,sort_keys=True)
+              if not scan:
+                  errors.append({'portal_record_id':r['portal_record_id'],'image_view_url':r['image_view_url'],'error':error})
+
+          fields=list(records[0].keys())
+          with (OUT/'LAC_UFO_SOURCE_INDEX.csv').open('w',encoding='utf-8-sig',newline='') as f:
+              w=csv.DictWriter(f,fieldnames=fields); w.writeheader(); w.writerows(records)
+          (OUT/'LAC_UFO_SOURCE_INDEX.json').write_text(json.dumps(records,ensure_ascii=False,indent=2),encoding='utf-8')
+          with (OUT/'SCAN_URL_ERRORS.csv').open('w',encoding='utf-8-sig',newline='') as f:
+              w=csv.DictWriter(f,fieldnames=['portal_record_id','image_view_url','error']); w.writeheader(); w.writerows(errors)
+
+          mappings=[
+              ('portal_record_id','gmr.source_record_id','Preserve LAC portal record identifier with LAC-UFO prefix.'),
+              ('source_sequence','gmr.source_sequence','Assign uninterrupted sequence across the four official record groups.'),
+              ('record_group','record.source_organization_record_ids','Resolve the responsible Canadian federal organization as a linked organization record.'),
+              ('document_title','document.title','Preserve the official document title.'),
+              ('original_sighting_date_text','date.original_date_text','Preserve source date wording; parse later into normalized event dates without replacing the original.'),
+              ('document_date','document.document_date','Preserve standardized portal document date.'),
+              ('original_location_text','gmr.original_location_text','Preserve source location wording and later map to canonical occurrence locations.'),
+              ('item_url','document.url','Preserve item display URL.'),
+              ('scan_image_url','media.url','Preserve direct source-scan URL; hash after acquisition.'),
+              ('source_attributes_json','gmr.source_attributes_json','Losslessly preserve portal fields and acquisition URLs.'),
+          ]
+          with (OUT/'SOURCE_FIELD_MAPPING.csv').open('w',encoding='utf-8-sig',newline='') as f:
+              w=csv.writer(f); w.writerow(['source_collection_id','source_field','gmr_field_key','transformation_rule','mapping_status','notes'])
+              for sf,gk,rule in mappings:
+                  w.writerow(['SRC-COLLECTION-LAC-CANADA-UFO',sf,gk,rule,'MAPPED','UFO Atlas GMR v1.0.0; central source-neutral database; no public source silo.'])
+
+          group_counts={g:sum(1 for r in records if r['record_group']==g) for g in GROUPS}
+          summary={
+              'source_collection_id':'SRC-COLLECTION-LAC-CANADA-UFO',
+              'collection_name':"Library and Archives Canada — Canada's UFOs: The Search for the Unknown",
+              'controlling_gmr_version':'1.0.0',
+              'central_database_only':True,
+              'public_silo_flag':0,
+              'physical_portal_records':len(records),
+              'listing_pages_processed':listing_page_count,
+              'record_group_counts':group_counts,
+              'first_source_record_id':records[0]['source_record_id'] if records else None,
+              'last_source_record_id':records[-1]['source_record_id'] if records else None,
+              'scan_urls_resolved':sum(bool(r['scan_image_url']) for r in records),
+              'scan_urls_unresolved':len(errors),
+              'status':'SOURCE_INDEX_COMPLETE' if not errors else 'SOURCE_INDEX_COMPLETE_WITH_SCAN_URL_ERRORS',
+              'next_stage':'Acquire scans, extract complete document contents, cluster documents into source-neutral cases and related records, match against the latest verified master, then perform additive master integration.',
+          }
+          (OUT/'ACQUISITION_SUMMARY.json').write_text(json.dumps(summary,indent=2),encoding='utf-8')
+          control={
+              'architecture':'ONE_SOURCE_NEUTRAL_UFO_ATLAS_MASTER',
+              'source_collection_role':'PROVENANCE_AND_ACQUISITION_SOURCE_ONLY',
+              'separate_database':False,
+              'separate_public_module':False,
+              'canonical_organization':'By record identity, event, metadata, and typed relationships—not by source collection.',
+              'integration_target':'Latest independently verified UFO Atlas master database',
+              'narrative_standard':'Complete beginning-to-end event-time narrative; source judgments remain in provenance.',
+              'publication_standard':'PUBLISHED and PUBLIC for completed records; no credibility gate.',
+          }
+          (OUT/'CENTRAL_DATABASE_INTEGRATION_CONTROL.json').write_text(json.dumps(control,indent=2),encoding='utf-8')
+
+          def sha256(path):
+              h=hashlib.sha256()
+              with path.open('rb') as f:
+                  for chunk in iter(lambda:f.read(1024*1024),b''): h.update(chunk)
+              return h.hexdigest()
+          manifest=[]
+          for p in sorted(OUT.iterdir()):
+              if p.name=='manifest.json' or not p.is_file(): continue
+              manifest.append({'path':p.name,'size_bytes':p.stat().st_size,'sha256':sha256(p)})
+          (OUT/'manifest.json').write_text(json.dumps({'files':manifest},indent=2),encoding='utf-8')
+
+          if errors:
+              print(f'WARNING: {len(errors)} scan URLs unresolved; source metadata rows remain preserved.',file=sys.stderr)
+          print(json.dumps(summary,indent=2),flush=True)
+          PY
+          python /tmp/acquire_lac_ufo.py
+          sha256sum export/* > export/SHA256SUMS.txt
+      - name: Upload acquisition artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lac-canada-ufo-source-index
+          path: export/
+          if-no-files-found: error
+          compression-level: 9
+          retention-days: 2
