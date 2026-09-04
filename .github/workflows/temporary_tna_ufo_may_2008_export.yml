@@ -1,0 +1,56 @@
+name: Temporary TNA UFO May 2008 source export
+
+on:
+  push:
+    paths:
+      - '.github/workflows/temporary_tna_ufo_may_2008_export.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Download official TNA May 2008 UFO files
+        run: |
+          set -euo pipefail
+          mkdir -p export
+          refs=(
+            defe-31-172-1
+            defe-31-173-1
+            defe-31-174-1
+            defe-31-175-1
+            defe-24-1922-1
+            defe-24-1923-1
+            defe-24-1924-1
+            defe-24-1925-1
+          )
+          for ref in "${refs[@]}"; do
+            url="https://filestore.nationalarchives.gov.uk/pdfs/ufos/${ref}.pdf"
+            echo "Downloading ${url}"
+            curl --fail --location --retry 4 --retry-delay 3 --connect-timeout 30 \
+              "$url" --output "export/${ref}.pdf"
+            test -s "export/${ref}.pdf"
+            file "export/${ref}.pdf" | grep -qi 'PDF document'
+          done
+          sha256sum export/*.pdf > export/SHA256SUMS.txt
+          wc -c export/*.pdf > export/SIZE_BYTES.txt
+          python - <<'PY'
+          from pathlib import Path
+          import json
+          files=[]
+          for p in sorted(Path('export').glob('*.pdf')):
+              files.append({'file': p.name, 'size_bytes': p.stat().st_size})
+          assert len(files)==8, len(files)
+          Path('export/SOURCE_MANIFEST.json').write_text(json.dumps({'release':'May 2008','files':files},indent=2))
+          PY
+      - name: Upload source artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tna-ufo-may-2008-official-pdfs
+          path: export/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 2
