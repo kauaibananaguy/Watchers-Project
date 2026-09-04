@@ -1,0 +1,17 @@
+{
+  "overall_status": "PASS_ALL_CASE_PAGES_DOWNLOADED",
+  "expected_case_pages": 3381,
+  "case_page_rows": 3381,
+  "initial_remands": 0,
+  "repaired_this_run": 0,
+  "unresolved_this_run": 0,
+  "remaining_remands": 0,
+  "case_page_status_counts": {
+    "DOWNLOADED": 3381
+  },
+  "case_page_field_rows": 22590,
+  "case_asset_link_rows": 14733,
+  "repair_attempt_rows": 0,
+  "sqlite_quick_check": "ok",
+  "foreign_key_violations": 0
+}
