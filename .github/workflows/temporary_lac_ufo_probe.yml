@@ -13,7 +13,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - name: Probe LAC UFO search results and record links
+      - name: Probe LAC UFO item pages and digital-object links
         run: |
           set -euo pipefail
           python -m pip install --quiet beautifulsoup4 requests
@@ -26,47 +26,56 @@ jobs:
 
           base='https://www.collectionscanada.gc.ca/databases/ufo/'
           search_url=base+'001057-100.01-e.php'
-          results_url=base+'001057-110.01-e.php'
-          groups=['Department of National Defence','Department of Transport','National Research Council','Royal Canadian Mounted Police']
           s=requests.Session()
           s.headers.update({'User-Agent':'Mozilla/5.0 (compatible; WatchersProjectResearch/1.0)'})
           first=s.get(search_url,timeout=60)
           first.raise_for_status()
           enc=first.encoding or first.apparent_encoding or 'latin-1'
-          text=first.content.decode(enc,errors='replace')
-          soup=BeautifulSoup(text,'html.parser')
-          sid=soup.find('input',{'name':'PHPSESSID'})
-          sid=sid.get('value') if sid else None
-          report={'session_id':sid,'groups':[]}
-          for group in groups:
-              params={'q7':group,'interval':'50'}
+          soup=BeautifulSoup(first.content.decode(enc,errors='replace'),'html.parser')
+          sid_tag=soup.find('input',{'name':'PHPSESSID'})
+          sid=sid_tag.get('value') if sid_tag else None
+          samples=[
+            ('13019','4519','13019-4519-0'),
+            ('37024','9332','37024-9332-6977'),
+            ('4677','879','4677-879-0'),
+          ]
+          report={'session_id':sid,'items':[]}
+          for isn,page,record in samples:
+              params={'isn_id_nbr':isn,'page_id_nbr':page,'record_id':record,'interval':'50'}
               if sid: params['PHPSESSID']=sid
-              r=s.get(results_url,params=params,timeout=120)
+              url=base+'001057-119.01-e.php'
+              r=s.get(url,params=params,timeout=120)
               raw=r.content
               enc=r.encoding or r.apparent_encoding or 'latin-1'
               html=raw.decode(enc,errors='replace')
-              name=re.sub(r'[^a-z0-9]+','_',group.lower()).strip('_')
-              Path(f'export/{name}_page1.html').write_text(html,encoding='utf-8')
+              Path(f'export/item_{record}.html').write_text(html,encoding='utf-8')
               sp=BeautifulSoup(html,'html.parser')
               links=[]
               for a in sp.find_all('a',href=True):
                   href=urllib.parse.urljoin(r.url,a['href'])
                   label=' '.join(a.get_text(' ',strip=True).split())
-                  if '001057' in href or '/ufo/' in href.lower() or 'documents/' in href.lower():
-                      links.append({'label':label,'url':href})
-              text_preview=' '.join(sp.get_text(' ',strip=True).split())[:4000]
-              report['groups'].append({
-                  'group':group,'requested_url':r.request.url,'final_url':r.url,'status':r.status_code,
-                  'bytes':len(raw),'title':sp.title.get_text(' ',strip=True) if sp.title else None,
-                  'links':links[:300],'text_preview':text_preview,
+                  links.append({'label':label,'url':href})
+              tables=[]
+              for table in sp.find_all('table'):
+                  rows=[]
+                  for tr in table.find_all('tr'):
+                      cells=[' '.join(c.get_text(' ',strip=True).split()) for c in tr.find_all(['th','td'])]
+                      if cells: rows.append(cells)
+                  if rows: tables.append(rows)
+              report['items'].append({
+                  'record_id':record,'requested_url':r.request.url,'status':r.status_code,'bytes':len(raw),
+                  'title':sp.title.get_text(' ',strip=True) if sp.title else None,
+                  'text':' '.join(sp.get_text(' ',strip=True).split())[:10000],
+                  'links':links[:300],
+                  'tables':tables[:20],
               })
-          Path('export/search_probe_report.json').write_text(json.dumps(report,indent=2,ensure_ascii=False),encoding='utf-8')
+          Path('export/item_probe_report.json').write_text(json.dumps(report,indent=2,ensure_ascii=False),encoding='utf-8')
           PY
           sha256sum export/* > export/SHA256SUMS.txt
       - name: Upload probe artifact
         uses: actions/upload-artifact@v4
         with:
-          name: lac-ufo-search-probe
+          name: lac-ufo-item-probe
           path: export/
           if-no-files-found: error
           retention-days: 2
