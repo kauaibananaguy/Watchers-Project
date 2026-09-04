@@ -1,0 +1,8 @@
+{
+  "source_snapshot_artifact_id": 9930286890,
+  "case_page_artifact_name": "GEIPAN_CASE_PAGE_SOURCE_SNAPSHOT_v0.2.0",
+  "linked_asset_artifact_name": "GEIPAN_LINKED_ASSET_METADATA_AND_TEXT_v0.1.0",
+  "controlling_architecture": "UFO Atlas GMR v1.0.0 and UFO-ATLAS-INT-STD-1.0.0",
+  "source_role": "GEIPAN is provenance, not a separate public hierarchy",
+  "central_identity_policy": "No irreversible source-side canonical identity allocation"
+}
