@@ -17,9 +17,10 @@ jobs:
         run: |
           set -euo pipefail
           python -m pip install --quiet beautifulsoup4 requests
+          rm -rf export
           mkdir -p export
           python - <<'PY'
-          import csv, hashlib, json, re, time, urllib.parse
+          import csv, hashlib, json, time, urllib.parse
           from pathlib import Path
 
           import requests
@@ -48,19 +49,29 @@ jobs:
               tag=soup.find('input',{'name':'PHPSESSID'})
               return session, (tag.get('value') if tag else None)
 
+          def cell_text(container, index):
+              node=container.select_one(f'div.alt_data{index}, div.data{index}')
+              return clean(node.get_text(' ',strip=True)) if node else ''
+
           all_rows=[]
           pagination=[]
-          global_seen=set()
           source_sequence=0
+          records_by_id={}
 
-          for group_order,group in enumerate(GROUPS,1):
+          for group_order,query_group in enumerate(GROUPS,1):
               session,sid=get_session()
               sk=1
               group_seen=set()
               page_number=0
+              visited_starts=set()
               while True:
+                  if sk in visited_starts:
+                      raise RuntimeError(f'Repeated pagination start {sk} for {query_group}')
+                  visited_starts.add(sk)
                   page_number+=1
-                  params={'q7':group,'interval':'50','sk':str(sk)}
+                  if page_number>500:
+                      raise RuntimeError(f'Pagination exceeded 500 pages for {query_group}')
+                  params={'q7':query_group,'interval':'50','sk':str(sk)}
                   if sid: params['PHPSESSID']=sid
                   response=session.get(RESULTS_URL,params=params,timeout=120)
                   response.raise_for_status()
@@ -71,10 +82,11 @@ jobs:
                   for table_order,table in enumerate(soup.select('table.data_table'),1):
                       group_cell=table.select_one('td.td_data')
                       title_cell=table.select_one('td.td_data_records')
-                      record_group=clean(group_cell.get_text(' ',strip=True).replace('Record Group:','',1)) if group_cell else group
+                      record_group=clean(group_cell.get_text(' ',strip=True).replace('Record Group:','',1)) if group_cell else query_group
                       document_title=clean(title_cell.get_text(' ',strip=True).replace('Document Title:','',1)) if title_cell else ''
-                      for container in table.select('div.alt_data_container'):
-                          record_anchor=container.select_one('div.alt_data4 a[href]')
+                      # The archived application alternates row classes between alt_data_* and data_*.
+                      for container in table.select('div.alt_data_container, div.data_container'):
+                          record_anchor=container.select_one('div.alt_data4 a[href], div.data4 a[href]')
                           if not record_anchor:
                               continue
                           record_id=clean(record_anchor.get_text(' ',strip=True))
@@ -82,12 +94,14 @@ jobs:
                           parsed=urllib.parse.parse_qs(urllib.parse.urlparse(href).query)
                           isn=(parsed.get('isn_id_nbr') or [''])[0]
                           page_id=(parsed.get('page_id_nbr') or [''])[0]
-                          location=clean((container.select_one('div.alt_data1') or {}).get_text(' ',strip=True) if container.select_one('div.alt_data1') else '')
-                          sighting_date=clean((container.select_one('div.alt_data2') or {}).get_text(' ',strip=True) if container.select_one('div.alt_data2') else '')
-                          document_date=clean((container.select_one('div.alt_data3') or {}).get_text(' ',strip=True) if container.select_one('div.alt_data3') else '')
+                          location=cell_text(container,1)
+                          sighting_date=cell_text(container,2)
+                          document_date=cell_text(container,3)
                           location='' if location.lower()=='[no location cited]' else location
                           sighting_date='' if sighting_date.lower()=='[no date cited]' else sighting_date
                           document_date='' if document_date.lower()=='[no date cited]' else document_date
+                          if not record_id or not isn:
+                              raise RuntimeError(f'Malformed result row on {query_group} page {page_number}: {container.get_text(" ",strip=True)[:300]}')
                           if record_id in group_seen:
                               continue
                           group_seen.add(record_id)
@@ -103,6 +117,7 @@ jobs:
                               'source_sequence':source_sequence,
                               'source_record_id':'LAC-UFO-'+record_id,
                               'lac_record_number':record_id,
+                              'query_record_group':query_group,
                               'record_group':record_group,
                               'document_title':document_title,
                               'sighting_location_raw':location,
@@ -119,7 +134,7 @@ jobs:
                           }
                           page_rows.append(row)
                           all_rows.append(row)
-                          global_seen.add(record_id)
+                          records_by_id.setdefault(record_id,[]).append(row)
                   next_links=[a for a in soup.find_all('a',href=True) if clean(a.get_text(' ',strip=True)).lower()=='next']
                   next_sk=None
                   for anchor in next_links:
@@ -129,7 +144,7 @@ jobs:
                           next_sk=int(candidate)
                           break
                   pagination.append({
-                      'record_group':group,
+                      'record_group':query_group,
                       'group_order':group_order,
                       'page_number':page_number,
                       'sk':sk,
@@ -139,22 +154,26 @@ jobs:
                       'response_bytes':len(response.content),
                       'html_sha256':hashlib.sha256(response.content).hexdigest(),
                   })
-                  print(f'{group}: page {page_number}, sk={sk}, rows={len(page_rows)}, total_group={len(group_seen)}',flush=True)
-                  if not next_sk or next_sk<=sk or len(page_rows)==0:
+                  print(f'{query_group}: page {page_number}, sk={sk}, rows={len(page_rows)}, total_group={len(group_seen)}',flush=True)
+                  if next_sk and len(page_rows)!=50:
+                      raise RuntimeError(f'Non-final page returned {len(page_rows)} parsed rows instead of 50 for {query_group} at sk={sk}')
+                  if not next_sk:
                       break
+                  if next_sk<=sk:
+                      raise RuntimeError(f'Non-advancing pagination for {query_group}: {sk} -> {next_sk}')
                   sk=next_sk
-                  time.sleep(0.15)
+                  time.sleep(0.12)
 
           if source_sequence != len(all_rows):
               raise RuntimeError('Source sequence count mismatch')
           if [r['source_sequence'] for r in all_rows] != list(range(1,len(all_rows)+1)):
               raise RuntimeError('Non-continuous source sequence')
+          # The official archive describes approximately 9,500 digitized records. A much smaller
+          # count signals a parser or pagination failure and must never be accepted as complete.
+          if len(all_rows)<8000:
+              raise RuntimeError(f'Full-corpus sanity check failed: only {len(all_rows)} source rows captured')
 
-          duplicate_record_numbers=[]
-          counts={}
-          for row in all_rows:
-              counts[row['lac_record_number']]=counts.get(row['lac_record_number'],0)+1
-          duplicate_record_numbers=[k for k,v in counts.items() if v>1]
+          duplicate_record_numbers=sorted(k for k,v in records_by_id.items() if len(v)>1)
 
           fieldnames=list(all_rows[0].keys())
           with open('export/LAC_UFO_INDEX_SOURCE_LEDGER.csv','w',encoding='utf-8-sig',newline='') as handle:
@@ -167,27 +186,28 @@ jobs:
               writer=csv.DictWriter(handle,fieldnames=list(pagination[0].keys()))
               writer.writeheader(); writer.writerows(pagination)
 
-          group_counts={g:sum(1 for r in all_rows if r['record_group']==g) for g in GROUPS}
+          group_counts={g:sum(1 for r in all_rows if r['query_record_group']==g) for g in GROUPS}
           report={
               'status':'COMPLETE',
               'source_collection_id':'SRC-COLLECTION-LAC-CANADAS-UFOS',
               'database_title':"Canada's UFOs: The Search for the Unknown",
               'source_rows':len(all_rows),
-              'unique_lac_record_numbers':len(global_seen),
+              'unique_lac_record_numbers':len(records_by_id),
               'duplicate_record_numbers_across_groups':duplicate_record_numbers,
               'group_counts':group_counts,
               'pagination_pages':len(pagination),
               'first_source_record_id':all_rows[0]['source_record_id'],
               'last_source_record_id':all_rows[-1]['source_record_id'],
               'continuous_source_sequence':True,
+              'minimum_corpus_sanity_check':8000,
               'public_database_url':SEARCH_URL,
           }
           Path('export/LAC_UFO_INDEX_CRAWL_REPORT.json').write_text(json.dumps(report,indent=2,ensure_ascii=False),encoding='utf-8')
           Path('export/README_FIRST.md').write_text(
-              '# LAC Canada UFO Atlas acquisition batch — index capture\n\n'
-              'This is a source-neutral GMR acquisition batch for migration into the one central Watchers Project UFO Atlas database. '
-              'It is not a separate public database. Every archived LAC search-result record has been captured in continuous source order. '
-              'Item-page metadata, image URLs, OCR, case reconstruction, canonical matching, and final GMR candidate records follow in later stages.\n',
+              '# LAC Canada UFO Atlas central-database acquisition batch — index capture\n\n'
+              'This is a source-neutral, GMR-bound acquisition batch for direct migration into the one central Watchers Project UFO Atlas database. '
+              'It is not a separate database, product, or public module. Every archived LAC search-result record is preserved in uninterrupted source order. '
+              'Item-page metadata, digital-image URLs, OCR, chronological case reconstruction, canonical matching, and final native GMR rows follow in the next controlled stages.\n',
               encoding='utf-8'
           )
           PY
