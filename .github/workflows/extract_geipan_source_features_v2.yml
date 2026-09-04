@@ -1,0 +1,168 @@
+name: Extract GEIPAN source features v2
+
+on:
+  workflow_run:
+    workflows:
+      - 'Repair GEIPAN linked asset remands'
+    types:
+      - completed
+  workflow_dispatch:
+    inputs:
+      asset_repair_run_id:
+        description: Successful asset-remand repair run ID; blank uses latest successful run
+        required: false
+        default: ''
+      page_repair_run_id:
+        description: Successful page-remand repair run ID; blank uses latest successful run
+        required: false
+        default: ''
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: geipan-source-feature-extraction-v2
+  cancel-in-progress: false
+
+jobs:
+  extract:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Resolve and download repaired source artifacts
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_ASSET_RUN_ID: ${{ github.event.workflow_run.id }}
+          INPUT_ASSET_RUN_ID: ${{ inputs.asset_repair_run_id }}
+          INPUT_PAGE_RUN_ID: ${{ inputs.page_repair_run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ASSET_RUN_ID="${INPUT_ASSET_RUN_ID:-${EVENT_ASSET_RUN_ID:-}}"
+          if [ -z "$ASSET_RUN_ID" ]; then
+            ASSET_RUN_ID="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/repair_geipan_linked_assets.yml/runs?status=success&per_page=1" --jq '.workflow_runs[0].id')"
+          fi
+          PAGE_RUN_ID="${INPUT_PAGE_RUN_ID:-}"
+          if [ -z "$PAGE_RUN_ID" ]; then
+            PAGE_RUN_ID="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/repair_geipan_case_pages.yml/runs?status=success&per_page=1" --jq '.workflow_runs[0].id')"
+          fi
+          test -n "$ASSET_RUN_ID"
+          test -n "$PAGE_RUN_ID"
+
+          artifact_id_for_run() {
+            local run_id="$1"
+            local artifact_name="$2"
+            gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/artifacts?per_page=100" \
+              --jq ".artifacts[] | select(.name==\"${artifact_name}\") | .id" | head -1
+          }
+          download_by_id() {
+            local artifact_id="$1"
+            local destination="$2"
+            curl --fail --location \
+              -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" \
+              --output "$destination"
+          }
+
+          ASSET_ARTIFACT_ID="$(artifact_id_for_run "$ASSET_RUN_ID" 'GEIPAN_LINKED_ASSET_METADATA_AND_TEXT_v0.1.2_REPAIRED')"
+          PAGE_ARTIFACT_ID="$(artifact_id_for_run "$PAGE_RUN_ID" 'GEIPAN_CASE_PAGE_SOURCE_SNAPSHOT_v0.2.1_REPAIRED')"
+          test -n "$ASSET_ARTIFACT_ID"
+          test -n "$PAGE_ARTIFACT_ID"
+          download_by_id "$ASSET_ARTIFACT_ID" asset-artifact.zip
+          download_by_id "$PAGE_ARTIFACT_ID" page-artifact.zip
+
+          mkdir -p asset-artifact page-artifact asset-snapshot page-snapshot
+          unzip -q asset-artifact.zip -d asset-artifact
+          unzip -q page-artifact.zip -d page-artifact
+          ASSET_INNER="$(find asset-artifact -type f -name 'GEIPAN_LINKED_ASSET_METADATA_AND_TEXT_v0.1.2_REPAIRED.zip' -print -quit)"
+          PAGE_INNER="$(find page-artifact -type f -name 'GEIPAN_CASE_PAGE_SOURCE_SNAPSHOT_v0.2.1_REPAIRED.zip' -print -quit)"
+          test -n "$ASSET_INNER"
+          test -n "$PAGE_INNER"
+          unzip -q "$ASSET_INNER" -d asset-snapshot
+          unzip -q "$PAGE_INNER" -d page-snapshot
+
+          ASSET_DB="$(find asset-snapshot -type f -name 'GEIPAN_LINKED_ASSET_METADATA_AND_TEXT_v0.1.2_REPAIRED.sqlite' -print -quit)"
+          PAGE_DB="$(find page-snapshot -type f -name 'GEIPAN_CASE_PAGE_SOURCE_SNAPSHOT_v0.2.1_REPAIRED.sqlite' -print -quit)"
+          test -n "$ASSET_DB"
+          test -n "$PAGE_DB"
+          cp "$ASSET_DB" "$(dirname "$ASSET_DB")/GEIPAN_LINKED_ASSET_METADATA_AND_TEXT_v0.1.0.sqlite"
+          cp "$PAGE_DB" "$(dirname "$PAGE_DB")/GEIPAN_CASE_PAGE_SOURCE_SNAPSHOT_v0.2.0.sqlite"
+          printf '%s\n' "$ASSET_RUN_ID" > ASSET_REPAIR_RUN_ID.txt
+          printf '%s\n' "$PAGE_RUN_ID" > PAGE_REPAIR_RUN_ID.txt
+
+      - name: Extract all directly supported French source features
+        run: |
+          mkdir -p output
+          python ufo_atlas/ingestion/geipan/extract_source_features_v1.py \
+            --case-pages page-snapshot \
+            --assets asset-snapshot \
+            --output output/GEIPAN_SOURCE_FEATURE_ASSERTIONS_v0.2.0_COMPLETE.sqlite \
+            --summary output/SUMMARY.json
+          python - <<'PY'
+          import json,sqlite3
+          from pathlib import Path
+          db=Path('output/GEIPAN_SOURCE_FEATURE_ASSERTIONS_v0.2.0_COMPLETE.sqlite')
+          con=sqlite3.connect(db)
+          quick=con.execute('PRAGMA quick_check').fetchone()[0]
+          fk=len(con.execute('PRAGMA foreign_key_check').fetchall())
+          assertions=con.execute('SELECT COUNT(*) FROM feature_assertion').fetchone()[0]
+          sources=con.execute('SELECT COUNT(*) FROM source_document').fetchone()[0]
+          families=dict(con.execute('SELECT feature_family,COUNT(*) FROM feature_assertion GROUP BY feature_family'))
+          con.close()
+          summary=json.load(open('output/SUMMARY.json'))
+          if quick!='ok' or fk or summary.get('overall_status')!='PASS':
+              raise SystemExit(json.dumps({'quick':quick,'fk':fk,'summary':summary},indent=2))
+          if assertions<=0 or summary.get('feature_assertions')!=assertions:
+              raise SystemExit('Feature assertion summary/database mismatch')
+          Path('output/FRESH_VERIFICATION.json').write_text(json.dumps({
+              'status':'PASS','sqlite_quick_check':quick,'foreign_key_violations':fk,
+              'source_documents':sources,'feature_assertions':assertions,
+              'feature_family_counts':families
+          },indent=2)+'\n',encoding='utf-8')
+          PY
+          cp ASSET_REPAIR_RUN_ID.txt output/
+          cp PAGE_REPAIR_RUN_ID.txt output/
+          (cd output && zip -q -r ../GEIPAN_SOURCE_FEATURE_ASSERTIONS_v0.2.0_COMPLETE.zip .)
+          sha256sum GEIPAN_SOURCE_FEATURE_ASSERTIONS_v0.2.0_COMPLETE.zip > \
+            GEIPAN_SOURCE_FEATURE_ASSERTIONS_v0.2.0_COMPLETE.zip.sha256
+          unzip -t GEIPAN_SOURCE_FEATURE_ASSERTIONS_v0.2.0_COMPLETE.zip >/dev/null
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GEIPAN_SOURCE_FEATURE_ASSERTIONS_v0.2.0_COMPLETE
+          path: |
+            GEIPAN_SOURCE_FEATURE_ASSERTIONS_v0.2.0_COMPLETE.zip
+            GEIPAN_SOURCE_FEATURE_ASSERTIONS_v0.2.0_COMPLETE.zip.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 90
+
+      - name: Preserve compact complete-feature evidence
+        run: |
+          set -euo pipefail
+          mkdir -p ufo_atlas/ingestion/geipan/features_v2_latest
+          cp output/SUMMARY.json ufo_atlas/ingestion/geipan/features_v2_latest/
+          cp output/FRESH_VERIFICATION.json ufo_atlas/ingestion/geipan/features_v2_latest/
+          cp output/ASSET_REPAIR_RUN_ID.txt ufo_atlas/ingestion/geipan/features_v2_latest/
+          cp output/PAGE_REPAIR_RUN_ID.txt ufo_atlas/ingestion/geipan/features_v2_latest/
+          cp GEIPAN_SOURCE_FEATURE_ASSERTIONS_v0.2.0_COMPLETE.zip.sha256 \
+            ufo_atlas/ingestion/geipan/features_v2_latest/PACKAGE_SHA256.txt
+          printf '%s\n' "${GITHUB_RUN_ID}" > \
+            ufo_atlas/ingestion/geipan/features_v2_latest/WORKFLOW_RUN_ID.txt
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add ufo_atlas/ingestion/geipan/features_v2_latest
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m 'Preserve complete repaired-source GEIPAN feature evidence [skip ci]'
+          git push
