@@ -1,0 +1,31 @@
+name: Temporary LAC UFO image probe
+
+on:
+  push:
+    paths:
+      - '.github/workflows/temporary_lac_ufo_image_probe.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Fetch one image-view page and its referenced assets
+        run: |
+          set -euo pipefail
+          mkdir -p export
+          base='https://www.collectionscanada.gc.ca/databases/ufo'
+          url="$base/001057-119.02-e.php?isn_id_nbr=37024&page_id_nbr=9281&record_id=37024-9281-6945&interval="
+          curl --fail --location --retry 3 --user-agent 'Mozilla/5.0' "$url" -o export/view.html
+          grep -Eio '(src|href)=["'"'][^"'"']+["'"']' export/view.html > export/assets.txt || true
+          sha256sum export/* > export/SHA256SUMS.txt
+      - name: Upload probe artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lac-ufo-image-probe
+          path: export/
+          if-no-files-found: error
+          retention-days: 1
