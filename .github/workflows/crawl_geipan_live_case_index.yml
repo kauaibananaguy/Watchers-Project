@@ -13,10 +13,13 @@ concurrency:
   group: geipan-live-case-index
   cancel-in-progress: false
 
+env:
+  RUN_TOKEN: '2026-09-04-throttled-resume-01'
+
 jobs:
   crawl:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
         with:
@@ -29,19 +32,22 @@ jobs:
         run: >-
           python crawl_live_case_index_resilient.py
           --output-dir live_index_output
-          --package GEIPAN_LIVE_CASE_INDEX_v0.1.0.zip
-          --delay-seconds 5.0
+          --package GEIPAN_LIVE_CASE_INDEX_v0.1.1.zip
+          --delay-seconds 8.0
       - name: Upload current live case index
         uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: GEIPAN_LIVE_CASE_INDEX_v0.1.0
+          name: GEIPAN_LIVE_CASE_INDEX_v0.1.1
           path: |
-            ufo_atlas/ingestion/geipan/GEIPAN_LIVE_CASE_INDEX_v0.1.0.zip
-            ufo_atlas/ingestion/geipan/GEIPAN_LIVE_CASE_INDEX_v0.1.0.zip.sha256
-          if-no-files-found: error
+            ufo_atlas/ingestion/geipan/GEIPAN_LIVE_CASE_INDEX_v0.1.1.zip
+            ufo_atlas/ingestion/geipan/GEIPAN_LIVE_CASE_INDEX_v0.1.1.zip.sha256
+            ufo_atlas/ingestion/geipan/live_index_output/
+          if-no-files-found: warn
           compression-level: 0
           retention-days: 90
       - name: Preserve compact live-index evidence
+        if: success()
         shell: bash
         run: |
           set -euo pipefail
@@ -50,7 +56,7 @@ jobs:
           cp ufo_atlas/ingestion/geipan/live_index_output/VALIDATION_REPORT.json ufo_atlas/ingestion/geipan/live_index_latest/
           cp ufo_atlas/ingestion/geipan/live_index_output/LIVE_STATS_CENSUS.json ufo_atlas/ingestion/geipan/live_index_latest/
           cp ufo_atlas/ingestion/geipan/live_index_output/STATIC_EXPORT_RECONCILIATION.json ufo_atlas/ingestion/geipan/live_index_latest/
-          cp ufo_atlas/ingestion/geipan/GEIPAN_LIVE_CASE_INDEX_v0.1.0.zip.sha256 ufo_atlas/ingestion/geipan/live_index_latest/PACKAGE_SHA256.txt
+          cp ufo_atlas/ingestion/geipan/GEIPAN_LIVE_CASE_INDEX_v0.1.1.zip.sha256 ufo_atlas/ingestion/geipan/live_index_latest/PACKAGE_SHA256.txt
           printf '%s\n' "${GITHUB_RUN_ID}" > ufo_atlas/ingestion/geipan/live_index_latest/WORKFLOW_RUN_ID.txt
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
