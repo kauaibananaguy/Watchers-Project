@@ -1,0 +1,85 @@
+name: Temporary LAC UFO full explicit offset sweep
+
+on:
+  push:
+    paths:
+      - '.github/workflows/temporary_lac_ufo_full_explicit_offset_sweep.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  acquire:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Sweep every visible browse offset
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet requests beautifulsoup4
+          mkdir -p export
+          cat > /tmp/sweep.py <<'PY'
+          import csv,json,re,time
+          from pathlib import Path
+          from urllib.parse import quote_plus,urljoin,urlsplit,parse_qs,urlunsplit
+          import requests
+          from bs4 import BeautifulSoup
+          BASE='https://www.collectionscanada.gc.ca/databases/ufo/'
+          SEARCH=urljoin(BASE,'001057-110.01-e.php')
+          GROUPS=['Department of National Defence','Department of Transport','National Research Council','Royal Canadian Mounted Police']
+          def cs(v): return re.sub(r'\s+',' ',v or '').strip()
+          def clean(url):
+              p=urlsplit(url); q='&'.join(x for x in p.query.replace('&&','&').split('&') if x and not x.startswith('PHPSESSID=')); return urlunsplit((p.scheme,p.netloc,p.path,q,''))
+          def get(url):
+              last=None
+              for n in range(4):
+                  try:
+                      s=requests.Session(); s.headers.update({'User-Agent':'Mozilla/5.0 (compatible; WatchersProject-UFOAtlas/1.0)'})
+                      r=s.get(url,timeout=60); r.raise_for_status(); return r.content
+                  except Exception as e: last=e; time.sleep(n+1)
+              raise RuntimeError(f'{url}: {last}')
+          records={}; log=[]
+          offsets=[0]+list(range(1,2002,25))+list(range(1,2002,50))+list(range(26,2002,50))
+          offsets=sorted(set(offsets))
+          for group in GROUPS:
+              group_ids=set(); sigs={}
+              empty_streak=0
+              for sk in offsets:
+                  url=f'{SEARCH}?brws_s=&q7={quote_plus(group)}&interval=25&sk={sk}'
+                  soup=BeautifulSoup(get(url).decode('latin-1',errors='replace'),'html.parser')
+                  rows=[]
+                  for table in soup.select('table.data_table'):
+                      text=cs(table.get_text(' ',strip=True))
+                      mrg=re.search(r'Record Group:\s*(.*?)\s+Document Title:',text,re.I)
+                      mdt=re.search(r'Document Title:\s*(.*?)\s+Location\s+Sighting Date',text,re.I)
+                      rg=cs(mrg.group(1)) if mrg else group; dt=cs(mdt.group(1)) if mdt else ''
+                      for block in table.select('div.alt_data_container'):
+                          a=block.select_one('div.alt_data4 a')
+                          if not a: continue
+                          def val(cls):
+                              n=block.select_one('div.'+cls); return cs(n.get_text(' ',strip=True)) if n else ''
+                          loc,sight,doc=val('alt_data1'),val('alt_data2'),val('alt_data3')
+                          rid=cs(a.get_text(' ',strip=True)); item=clean(urljoin(url,a.get('href'))); q=parse_qs(urlsplit(item).query)
+                          row={'portal_record_id':rid,'record_group':rg,'document_title':dt,'original_location_text':'' if loc.lower()=='[no location cited]' else loc,'original_sighting_date_text':'' if sight.lower()=='[no date cited]' else sight,'document_date':'' if doc.lower()=='[no date cited]' else doc,'isn_id_nbr':(q.get('isn_id_nbr') or [''])[0],'page_id_nbr':(q.get('page_id_nbr') or [''])[0],'item_url':item,'explicit_browse_offset':sk}
+                          rows.append(row); records.setdefault(rid,row); group_ids.add(rid)
+                  signature='|'.join(r['portal_record_id'] for r in rows)
+                  sigs[signature]=sigs.get(signature,0)+1
+                  log.append({'record_group':group,'sk':sk,'rows':len(rows),'unique_group_total':len(group_ids),'signature_occurrences':sigs[signature],'first_id':rows[0]['portal_record_id'] if rows else '','last_id':rows[-1]['portal_record_id'] if rows else ''})
+                  if sk%250 in (0,1,26): print(f'{group} sk={sk} rows={len(rows)} unique={len(group_ids)}',flush=True)
+              print(f'COMPLETED {group}: {len(group_ids)} unique records',flush=True)
+          rows=sorted(records.values(),key=lambda r:(GROUPS.index(r['record_group']) if r['record_group'] in GROUPS else 99,r['portal_record_id']))
+          with Path('export/OFFSET_SWEEP_SOURCE_INDEX.csv').open('w',encoding='utf-8-sig',newline='') as f:
+              w=csv.DictWriter(f,fieldnames=list(rows[0].keys())); w.writeheader(); w.writerows(rows)
+          with Path('export/OFFSET_SWEEP_LEDGER.csv').open('w',encoding='utf-8-sig',newline='') as f:
+              w=csv.DictWriter(f,fieldnames=list(log[0].keys())); w.writeheader(); w.writerows(log)
+          summary={'unique_records':len(rows),'record_group_counts':{g:sum(r['record_group']==g for r in rows) for g in GROUPS},'undated_unlocated':sum(not r['document_date'] and not r['original_sighting_date_text'] and not r['original_location_text'] for r in rows)}
+          Path('export/OFFSET_SWEEP_SUMMARY.json').write_text(json.dumps(summary,indent=2),encoding='utf-8')
+          print(json.dumps(summary,indent=2))
+          PY
+          python /tmp/sweep.py
+      - name: Upload offset sweep
+        uses: actions/upload-artifact@v4
+        with:
+          name: lac-ufo-full-explicit-offset-sweep
+          path: export/
+          retention-days: 1
