@@ -1,0 +1,106 @@
+name: Watchdog GEIPAN ingestion pipeline
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/watchdog_geipan_pipeline.yml'
+  schedule:
+    - cron: '17,47 * * * *'
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: watchdog-geipan-ingestion-pipeline
+  cancel-in-progress: true
+
+env:
+  RELEASE_TAG: 'ufo-atlas-geipan-enrichment-v0.4.1'
+
+jobs:
+  advance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dispatch the earliest incomplete stage
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          latest_success_id() {
+            local workflow="$1"
+            gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/runs?status=success&per_page=1" --jq '.workflow_runs[0].id // empty'
+          }
+
+          active_count() {
+            local workflow="$1"
+            gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow}/runs?per_page=20" \
+              --jq '[.workflow_runs[] | select(.status=="queued" or .status=="in_progress" or .status=="waiting" or .status=="pending")] | length'
+          }
+
+          dispatch_if_idle() {
+            local workflow="$1"
+            shift
+            local active
+            active="$(active_count "$workflow")"
+            if [ "$active" -gt 0 ]; then
+              echo "${workflow} already has ${active} active run(s)."
+              exit 0
+            fi
+            gh workflow run "$workflow" --ref main "$@"
+            echo "Dispatched ${workflow}."
+            exit 0
+          }
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "GEIPAN enrichment input release already exists; watchdog complete."
+            exit 0
+          fi
+
+          PAGE_RUN="$(latest_success_id acquire_geipan_case_pages_v2.yml)"
+          if [ -z "$PAGE_RUN" ]; then
+            dispatch_if_idle acquire_geipan_case_pages_v2.yml
+          fi
+
+          PAGE_REPAIR_RUN="$(latest_success_id repair_geipan_case_pages.yml)"
+          if [ -z "$PAGE_REPAIR_RUN" ]; then
+            dispatch_if_idle repair_geipan_case_pages.yml -f source_run_id="$PAGE_RUN"
+          fi
+
+          ASSET_RUN="$(latest_success_id acquire_geipan_linked_assets_v2.yml)"
+          if [ -z "$ASSET_RUN" ]; then
+            dispatch_if_idle acquire_geipan_linked_assets_v2.yml -f source_run_id="$PAGE_REPAIR_RUN"
+          fi
+
+          ASSET_REPAIR_RUN="$(latest_success_id repair_geipan_linked_assets.yml)"
+          if [ -z "$ASSET_REPAIR_RUN" ]; then
+            dispatch_if_idle repair_geipan_linked_assets.yml -f source_run_id="$ASSET_RUN"
+          fi
+
+          FEATURE_RUN="$(latest_success_id extract_geipan_source_features_v2.yml)"
+          if [ -z "$FEATURE_RUN" ]; then
+            dispatch_if_idle extract_geipan_source_features_v2.yml -f asset_repair_run_id="$ASSET_REPAIR_RUN" -f page_repair_run_id="$PAGE_REPAIR_RUN"
+          fi
+
+          BUNDLE_RUN="$(latest_success_id build_geipan_enrichment_input_bundle_v2.yml)"
+          if [ -z "$BUNDLE_RUN" ]; then
+            dispatch_if_idle build_geipan_enrichment_input_bundle_v2.yml -f feature_run_id="$FEATURE_RUN"
+          fi
+
+          PUBLISH_RUN="$(latest_success_id publish_geipan_enrichment_bundle_release.yml)"
+          if [ -z "$PUBLISH_RUN" ]; then
+            dispatch_if_idle publish_geipan_enrichment_bundle_release.yml -f source_run_id="$BUNDLE_RUN"
+          fi
+
+          RAW_RELEASE_RUN="$(latest_success_id publish_geipan_raw_asset_shards.yml)"
+          if [ -z "$RAW_RELEASE_RUN" ] && [ "$(active_count publish_geipan_raw_asset_shards.yml)" -eq 0 ]; then
+            gh workflow run publish_geipan_raw_asset_shards.yml --ref main -f repair_run_id="$ASSET_REPAIR_RUN"
+            echo "Dispatched durable raw-asset publication."
+          fi
+
+          echo "All processing stages have successful runs; waiting only for release visibility."
