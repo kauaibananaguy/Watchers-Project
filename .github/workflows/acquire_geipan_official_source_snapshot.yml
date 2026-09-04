@@ -13,6 +13,7 @@ concurrency:
   group: geipan-official-source-snapshot
   cancel-in-progress: false
 
+# Acquisition implementation revision 2: preserves malformed official schema XLSX as raw evidence.
 jobs:
   acquire:
     runs-on: ubuntu-latest
@@ -72,6 +73,7 @@ jobs:
           cp snapshot/output/SOURCE_FILE_INVENTORY.json ufo_atlas/ingestion/geipan/latest/
           cp snapshot/output/SOURCE_FIELD_HEADERS.json ufo_atlas/ingestion/geipan/latest/
           cp snapshot/output/GEIPAN_SCHEMA_WORKBOOK_PROFILE.json ufo_atlas/ingestion/geipan/latest/
+          cp snapshot/output/LIVE_STATS_CENSUS.json ufo_atlas/ingestion/geipan/latest/
           cp snapshot/output/VALIDATION_REPORT.json ufo_atlas/ingestion/geipan/latest/
           cp snapshot/GEIPAN_OFFICIAL_SOURCE_SNAPSHOT_v0.1.0.zip.sha256 ufo_atlas/ingestion/geipan/latest/PACKAGE_SHA256.txt
           printf '%s\n' "${GITHUB_RUN_ID}" > ufo_atlas/ingestion/geipan/latest/WORKFLOW_RUN_ID.txt
