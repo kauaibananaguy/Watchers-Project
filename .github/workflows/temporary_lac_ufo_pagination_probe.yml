@@ -1,0 +1,43 @@
+name: Temporary LAC UFO pagination probe
+
+on:
+  push:
+    paths:
+      - '.github/workflows/temporary_lac_ufo_pagination_probe.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Probe NRC offsets
+        run: |
+          set -euo pipefail
+          mkdir -p export
+          base='https://www.collectionscanada.gc.ca/databases/ufo/001057-110.01-e.php?brws_s=&q7=National+Research+Council&interval=50&sk='
+          for sk in 1951 2001 2051 2101 2501 3001 4001 6001; do
+            curl --fail --location --retry 3 --user-agent 'Mozilla/5.0' "${base}${sk}" -o "export/nrc_${sk}.html"
+          done
+          python - <<'PY'
+          from pathlib import Path
+          import re,json,html
+          out=[]
+          for p in sorted(Path('export').glob('nrc_*.html')):
+              t=p.read_bytes().decode('latin-1',errors='replace')
+              ids=re.findall(r'record_id=([^&" ]+)',t)
+              ids=list(dict.fromkeys(html.unescape(x) for x in ids if re.match(r'\d+-\d+-\d+$',html.unescape(x))))
+              nexts=re.findall(r'href="([^"]+)"[^>]*>Next</a>',t,re.I)
+              prevs=re.findall(r'href="([^"]+)"[^>]*>Previous</a>',t,re.I)
+              out.append({'file':p.name,'rows':len(ids),'first':ids[0] if ids else None,'last':ids[-1] if ids else None,'next':html.unescape(nexts[0]) if nexts else None,'previous':html.unescape(prevs[0]) if prevs else None})
+          Path('export/pagination_summary.json').write_text(json.dumps(out,indent=2),encoding='utf-8')
+          print(json.dumps(out,indent=2))
+          PY
+      - name: Upload probe
+        uses: actions/upload-artifact@v4
+        with:
+          name: lac-ufo-pagination-probe
+          path: export/
+          retention-days: 1
