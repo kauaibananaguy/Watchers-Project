@@ -17,18 +17,18 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Route remands through live-variant and public-archive recovery
+      - name: Route repair inputs through live-variant and public-archive recovery
         run: |
           python - <<'PY'
           from pathlib import Path
 
-          workflow = Path('.github/workflows/repair_geipan_linked_assets.yml')
-          text = workflow.read_text(encoding='utf-8')
-          old = 'python ufo_atlas/ingestion/geipan/crawl_assets_v1.py acquire \\\n'
-          new = 'python ufo_atlas/ingestion/geipan/acquire_assets_repair_v2.py acquire \\\n'
-          if text.count(old) != 1:
-              raise SystemExit(f'Expected one repair acquisition command, found {text.count(old)}')
-          workflow.write_text(text.replace(old, new), encoding='utf-8')
+          crawler = Path('ufo_atlas/ingestion/geipan/crawl_assets_v1.py')
+          text = crawler.read_text(encoding='utf-8')
+          old_acquire = '''def acquire(args: argparse.Namespace) -> None:\n    assets = json.loads(Path(args.assets).read_text(encoding="utf-8"))\n'''
+          new_acquire = '''def acquire(args: argparse.Namespace) -> None:\n    # A repair plan is a second-pass remand set. Route only that input through\n    # live URL correction and public archival recovery; the primary acquisition\n    # remains unchanged and source URLs remain the asset identities.\n    if Path(args.assets).name == "repair_assets.json":\n        import acquire_assets_repair_v2 as recovery\n        shared.request_bytes = recovery.resilient_request_bytes\n\n    assets = json.loads(Path(args.assets).read_text(encoding="utf-8"))\n'''
+          if text.count(old_acquire) != 1:
+              raise SystemExit(f'Could not locate acquire entry point: {text.count(old_acquire)}')
+          crawler.write_text(text.replace(old_acquire, new_acquire, 1), encoding='utf-8')
 
           repair = Path('ufo_atlas/ingestion/geipan/repair_assets_v012.py')
           text = repair.read_text(encoding='utf-8')
@@ -60,13 +60,14 @@ jobs:
           repair.write_text(text, encoding='utf-8')
           PY
 
-      - name: Compile changed Python and verify workflow routing
+      - name: Compile the upgraded recovery path
         run: |
           python -m py_compile \
             ufo_atlas/ingestion/geipan/acquire_assets_repair_v2.py \
+            ufo_atlas/ingestion/geipan/crawl_assets_v1.py \
             ufo_atlas/ingestion/geipan/repair_assets_v012.py
-          grep -F 'acquire_assets_repair_v2.py acquire' \
-            .github/workflows/repair_geipan_linked_assets.yml
+          grep -F 'Path(args.assets).name == "repair_assets.json"' \
+            ufo_atlas/ingestion/geipan/crawl_assets_v1.py
 
       - name: Commit the repair upgrade
         run: |
@@ -74,7 +75,7 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add \
-            .github/workflows/repair_geipan_linked_assets.yml \
+            ufo_atlas/ingestion/geipan/crawl_assets_v1.py \
             ufo_atlas/ingestion/geipan/repair_assets_v012.py
           if git diff --cached --quiet; then
             exit 0
