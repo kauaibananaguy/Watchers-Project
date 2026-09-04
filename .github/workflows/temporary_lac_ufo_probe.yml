@@ -13,13 +13,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - name: Probe LAC UFO item pages and digital-object links
+      - name: Probe LAC UFO image pages and underlying media
         run: |
           set -euo pipefail
           python -m pip install --quiet beautifulsoup4 requests
           mkdir -p export
           python - <<'PY'
-          import json, urllib.parse, re
+          import json, urllib.parse, mimetypes
           from pathlib import Path
           import requests
           from bs4 import BeautifulSoup
@@ -34,48 +34,46 @@ jobs:
           soup=BeautifulSoup(first.content.decode(enc,errors='replace'),'html.parser')
           sid_tag=soup.find('input',{'name':'PHPSESSID'})
           sid=sid_tag.get('value') if sid_tag else None
-          samples=[
-            ('13019','4519','13019-4519-0'),
-            ('37024','9332','37024-9332-6977'),
-            ('4677','879','4677-879-0'),
-          ]
+          samples=[('13019','4519','13019-4519-0'),('37024','9332','37024-9332-6977'),('4677','879','4677-879-0')]
           report={'session_id':sid,'items':[]}
           for isn,page,record in samples:
               params={'isn_id_nbr':isn,'page_id_nbr':page,'record_id':record,'interval':'50'}
               if sid: params['PHPSESSID']=sid
-              url=base+'001057-119.01-e.php'
+              url=base+'001057-119.02-e.php'
               r=s.get(url,params=params,timeout=120)
               raw=r.content
               enc=r.encoding or r.apparent_encoding or 'latin-1'
               html=raw.decode(enc,errors='replace')
-              Path(f'export/item_{record}.html').write_text(html,encoding='utf-8')
+              Path(f'export/image_page_{record}.html').write_text(html,encoding='utf-8')
               sp=BeautifulSoup(html,'html.parser')
-              links=[]
-              for a in sp.find_all('a',href=True):
-                  href=urllib.parse.urljoin(r.url,a['href'])
-                  label=' '.join(a.get_text(' ',strip=True).split())
-                  links.append({'label':label,'url':href})
-              tables=[]
-              for table in sp.find_all('table'):
-                  rows=[]
-                  for tr in table.find_all('tr'):
-                      cells=[' '.join(c.get_text(' ',strip=True).split()) for c in tr.find_all(['th','td'])]
-                      if cells: rows.append(cells)
-                  if rows: tables.append(rows)
-              report['items'].append({
-                  'record_id':record,'requested_url':r.request.url,'status':r.status_code,'bytes':len(raw),
-                  'title':sp.title.get_text(' ',strip=True) if sp.title else None,
-                  'text':' '.join(sp.get_text(' ',strip=True).split())[:10000],
-                  'links':links[:300],
-                  'tables':tables[:20],
-              })
-          Path('export/item_probe_report.json').write_text(json.dumps(report,indent=2,ensure_ascii=False),encoding='utf-8')
+              media=[]
+              for tag in sp.find_all(['img','a','embed','object','iframe']):
+                  attr = 'src' if tag.has_attr('src') else ('href' if tag.has_attr('href') else ('data' if tag.has_attr('data') else None))
+                  if not attr: continue
+                  href=urllib.parse.urljoin(r.url,tag.get(attr))
+                  label=' '.join(tag.get_text(' ',strip=True).split()) if tag.name=='a' else (tag.get('alt') or '')
+                  if any(x in href.lower() for x in ['.jpg','.jpeg','.gif','.png','.tif','.tiff','.pdf','ufo','image','digit']):
+                      media.append({'tag':tag.name,'label':label,'url':href})
+              downloaded=[]
+              for i,m in enumerate(media[:20],1):
+                  try:
+                      rr=s.get(m['url'],timeout=120,allow_redirects=True)
+                      ct=rr.headers.get('content-type','')
+                      if rr.status_code==200 and len(rr.content)>1000 and ('image' in ct or 'pdf' in ct or m['url'].lower().endswith(('.jpg','.jpeg','.gif','.png','.tif','.tiff','.pdf'))):
+                          ext=mimetypes.guess_extension(ct.split(';')[0].strip()) or Path(urllib.parse.urlparse(rr.url).path).suffix or '.bin'
+                          out=Path('export')/f'{record}_media_{i}{ext}'
+                          out.write_bytes(rr.content)
+                          downloaded.append({'url':m['url'],'final_url':rr.url,'content_type':ct,'bytes':len(rr.content),'file':out.name})
+                  except Exception as e:
+                      downloaded.append({'url':m['url'],'error':repr(e)})
+              report['items'].append({'record_id':record,'requested_url':r.request.url,'status':r.status_code,'bytes':len(raw),'text':' '.join(sp.get_text(' ',strip=True).split())[:8000],'media':media,'downloaded':downloaded})
+          Path('export/image_probe_report.json').write_text(json.dumps(report,indent=2,ensure_ascii=False),encoding='utf-8')
           PY
           sha256sum export/* > export/SHA256SUMS.txt
       - name: Upload probe artifact
         uses: actions/upload-artifact@v4
         with:
-          name: lac-ufo-item-probe
+          name: lac-ufo-image-probe
           path: export/
           if-no-files-found: error
           retention-days: 2
