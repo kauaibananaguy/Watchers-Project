@@ -1,0 +1,133 @@
+name: Repair GEIPAN case page remands
+
+on:
+  workflow_run:
+    workflows:
+      - 'Acquire GEIPAN case pages v2'
+    types:
+      - completed
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: Successful GEIPAN case-page v2 run ID; blank uses latest successful run
+        required: false
+        default: ''
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: geipan-case-page-remand-repair
+  cancel-in-progress: false
+
+env:
+  PYTHONUNBUFFERED: '1'
+  EXPECTED_CASES: '3381'
+
+jobs:
+  repair:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Resolve and download case-page snapshot
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_RUN_ID: ${{ github.event.workflow_run.id }}
+          INPUT_RUN_ID: ${{ inputs.source_run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUN_ID="${INPUT_RUN_ID:-${EVENT_RUN_ID:-}}"
+          if [ -z "$RUN_ID" ]; then
+            RUN_ID="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/acquire_geipan_case_pages_v2.yml/runs?status=success&per_page=1" --jq '.workflow_runs[0].id')"
+          fi
+          test -n "$RUN_ID"
+          ARTIFACT_ID="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/artifacts?per_page=100" --jq '.artifacts[] | select(.name=="GEIPAN_CASE_PAGE_SOURCE_SNAPSHOT_v0.2.0") | .id' | head -1)"
+          test -n "$ARTIFACT_ID"
+          curl --fail --location \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${ARTIFACT_ID}/zip" \
+            --output page-artifact.zip
+          mkdir -p page-artifact page-snapshot
+          unzip -q page-artifact.zip -d page-artifact
+          INNER="$(find page-artifact -type f -name 'GEIPAN_CASE_PAGE_SOURCE_SNAPSHOT_v0.2.0.zip' -print -quit)"
+          test -n "$INNER"
+          unzip -q "$INNER" -d page-snapshot
+          printf '%s\n' "$RUN_ID" > SOURCE_RUN_ID.txt
+          printf '%s\n' "$ARTIFACT_ID" > SOURCE_ARTIFACT_ID.txt
+
+      - name: Retry all explicit page remands
+        id: repair
+        continue-on-error: true
+        run: |
+          python ufo_atlas/ingestion/geipan/repair_case_pages_v021.py \
+            --input-dir page-snapshot \
+            --output-dir repaired \
+            --expected-cases "$EXPECTED_CASES" \
+            --delay-seconds 30.0 \
+            --retries 12
+
+      - name: Package repair result and diagnostics
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f repaired/REPAIR_SUMMARY.json
+          (cd repaired && zip -q -r ../GEIPAN_CASE_PAGE_SOURCE_SNAPSHOT_v0.2.1_REPAIRED.zip .)
+          sha256sum GEIPAN_CASE_PAGE_SOURCE_SNAPSHOT_v0.2.1_REPAIRED.zip > \
+            GEIPAN_CASE_PAGE_SOURCE_SNAPSHOT_v0.2.1_REPAIRED.zip.sha256
+          unzip -t GEIPAN_CASE_PAGE_SOURCE_SNAPSHOT_v0.2.1_REPAIRED.zip >/dev/null
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: GEIPAN_CASE_PAGE_SOURCE_SNAPSHOT_v0.2.1_REPAIRED
+          path: |
+            GEIPAN_CASE_PAGE_SOURCE_SNAPSHOT_v0.2.1_REPAIRED.zip
+            GEIPAN_CASE_PAGE_SOURCE_SNAPSHOT_v0.2.1_REPAIRED.zip.sha256
+            repaired/REPAIR_SUMMARY.json
+            repaired/REPAIR_QUEUE.csv
+          if-no-files-found: warn
+          compression-level: 0
+          retention-days: 90
+
+      - name: Enforce zero remaining page remands
+        run: |
+          python - <<'PY'
+          import json
+          report=json.load(open('repaired/REPAIR_SUMMARY.json'))
+          if report.get('overall_status')!='PASS_ALL_CASE_PAGES_DOWNLOADED':
+              raise SystemExit(json.dumps(report,indent=2))
+          if report.get('case_page_rows')!=3381 or report.get('remaining_remands')!=0:
+              raise SystemExit(json.dumps(report,indent=2))
+          PY
+
+      - name: Preserve compact repair evidence
+        run: |
+          set -euo pipefail
+          mkdir -p ufo_atlas/ingestion/geipan/case_pages_repaired_latest
+          cp repaired/REPAIR_SUMMARY.json ufo_atlas/ingestion/geipan/case_pages_repaired_latest/
+          cp repaired/REPAIR_QUEUE.csv ufo_atlas/ingestion/geipan/case_pages_repaired_latest/
+          cp GEIPAN_CASE_PAGE_SOURCE_SNAPSHOT_v0.2.1_REPAIRED.zip.sha256 \
+            ufo_atlas/ingestion/geipan/case_pages_repaired_latest/PACKAGE_SHA256.txt
+          cp SOURCE_RUN_ID.txt ufo_atlas/ingestion/geipan/case_pages_repaired_latest/
+          cp SOURCE_ARTIFACT_ID.txt ufo_atlas/ingestion/geipan/case_pages_repaired_latest/
+          printf '%s\n' "${GITHUB_RUN_ID}" > \
+            ufo_atlas/ingestion/geipan/case_pages_repaired_latest/WORKFLOW_RUN_ID.txt
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add ufo_atlas/ingestion/geipan/case_pages_repaired_latest
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m 'Preserve repaired GEIPAN case-page evidence [skip ci]'
+          git push
