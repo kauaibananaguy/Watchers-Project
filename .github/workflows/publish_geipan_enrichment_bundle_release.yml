@@ -1,0 +1,97 @@
+name: Publish GEIPAN enrichment bundle release
+
+on:
+  workflow_run:
+    workflows:
+      - 'Build GEIPAN enrichment input bundle v2'
+    types:
+      - completed
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: Successful bundle-v2 run ID; blank uses latest successful run
+        required: false
+        default: ''
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: publish-geipan-enrichment-bundle-v041
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: 'ufo-atlas-geipan-enrichment-v0.4.1'
+  ARTIFACT_NAME: 'UFO_ATLAS_GEIPAN_ENRICHMENT_INPUT_BUNDLE_v0.4.1_COMPLETE'
+  PACKAGE_NAME: 'UFO_ATLAS_GEIPAN_ENRICHMENT_INPUT_BUNDLE_v0.4.1_COMPLETE.zip'
+
+jobs:
+  publish:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Resolve and download validated bundle artifact
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_RUN_ID: ${{ github.event.workflow_run.id }}
+          INPUT_RUN_ID: ${{ inputs.source_run_id }}
+        run: |
+          set -euo pipefail
+          RUN_ID="${INPUT_RUN_ID:-${EVENT_RUN_ID:-}}"
+          if [ -z "$RUN_ID" ]; then
+            RUN_ID="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/build_geipan_enrichment_input_bundle_v2.yml/runs?status=success&per_page=1" --jq '.workflow_runs[0].id')"
+          fi
+          test -n "$RUN_ID"
+          ARTIFACT_ID="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/artifacts?per_page=100" --jq ".artifacts[] | select(.name==\"${ARTIFACT_NAME}\") | .id" | head -1)"
+          test -n "$ARTIFACT_ID"
+          curl --fail --location \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${ARTIFACT_ID}/zip" \
+            --output artifact.zip
+          mkdir artifact
+          unzip -q artifact.zip -d artifact
+          PACKAGE="$(find artifact -type f -name "$PACKAGE_NAME" -print -quit)"
+          CHECKSUM="$(find artifact -type f -name "${PACKAGE_NAME}.sha256" -print -quit)"
+          test -n "$PACKAGE"
+          test -n "$CHECKSUM"
+          unzip -t "$PACKAGE" >/dev/null
+          sha256sum -c "$CHECKSUM"
+          cp "$PACKAGE" .
+          cp "$CHECKSUM" .
+          printf '%s\n' "$RUN_ID" > SOURCE_WORKFLOW_RUN_ID.txt
+          printf '%s\n' "$ARTIFACT_ID" > SOURCE_ARTIFACT_ID.txt
+      - name: Publish or update durable GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "$PACKAGE_NAME" "${PACKAGE_NAME}.sha256" --clobber
+          else
+            gh release create "$RELEASE_TAG" "$PACKAGE_NAME" "${PACKAGE_NAME}.sha256" \
+              --title 'UFO Atlas GEIPAN enrichment input bundle v0.4.1' \
+              --notes 'Validated source-neutral GEIPAN enrichment input. GEIPAN/CNES remains source provenance. Central identity allocation and final duplicate adjudication remain the responsibility of the UFO Atlas master rebase.'
+          fi
+      - name: Preserve durable release evidence
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p ufo_atlas/ingestion/geipan/enrichment_input_release
+          gh release view "$RELEASE_TAG" --json tagName,name,url,assets > ufo_atlas/ingestion/geipan/enrichment_input_release/RELEASE.json
+          cp SOURCE_WORKFLOW_RUN_ID.txt ufo_atlas/ingestion/geipan/enrichment_input_release/
+          cp SOURCE_ARTIFACT_ID.txt ufo_atlas/ingestion/geipan/enrichment_input_release/
+          cp "${PACKAGE_NAME}.sha256" ufo_atlas/ingestion/geipan/enrichment_input_release/PACKAGE_SHA256.txt
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add ufo_atlas/ingestion/geipan/enrichment_input_release
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m 'Preserve durable GEIPAN enrichment bundle release [skip ci]'
+          git push
