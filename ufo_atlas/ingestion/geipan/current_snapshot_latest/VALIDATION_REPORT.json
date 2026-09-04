@@ -1,0 +1,46 @@
+{
+  "overall_status": "PASS",
+  "package_id": "UFO-ATLAS-IMPORT-GEIPAN-SOURCE-SNAPSHOT-0.2.0",
+  "stage": "CURRENT_AND_LEGACY_OFFICIAL_SOURCE_ACQUISITION",
+  "source_collection_id": "SRC-COLLECTION-GEIPAN",
+  "acquired_at": "2026-09-04T09:00:53Z",
+  "gmr_version": "UFO Atlas GMR v1.0.0",
+  "source_record_count": 17573,
+  "source_record_counts_by_family": {
+    "CURRENT_CASE_EXPORT": 3381,
+    "CURRENT_TESTIMONY_EXPORT": 6068,
+    "LEGACY_CASE_EXPORT": 2768,
+    "LEGACY_TESTIMONY_EXPORT": 5356
+  },
+  "source_field_instances": 338,
+  "current_case_export_rows": 3381,
+  "live_stats_published_cases": 3381,
+  "current_case_export_matches_live_stats": true,
+  "unique_case_ids_across_exports": 3392,
+  "case_reconciliation_status_counts": {
+    "CURRENT_AND_LEGACY": 2757,
+    "LEGACY_ONLY": 11,
+    "CURRENT_ONLY": 624
+  },
+  "unique_testimony_title_keys_across_exports": 6176,
+  "testimony_reconciliation_status_counts": {
+    "LEGACY_ONLY": 109,
+    "CURRENT_AND_LEGACY": 5246,
+    "CURRENT_ONLY": 821
+  },
+  "sqlite_quick_check": "ok",
+  "foreign_key_violations": 0,
+  "duplicate_source_record_ids": 0,
+  "source_sequence_start": 1,
+  "source_sequence_end": 17573,
+  "source_sequence_distinct_count": 17573,
+  "candidate_records_built": 0,
+  "gmr_mapping_status": "NEXT_STAGE",
+  "next_stage": "SOURCE_FIELD_MAPPING_GMR_TRANSFORMATION_CASE_PACKET_AND_ATTACHMENT_ACQUISITION",
+  "limitations": [
+    "This package is an acquisition and reconciliation checkpoint, not the final GMR import module.",
+    "Current XLSX exports are complete for the published case/testimony tables but contain fewer columns than the older detailed CSV exports; both are preserved.",
+    "The official 2019 field-description workbook is retained even if its malformed ZIP offsets prevent ordinary workbook parsing.",
+    "Case pages, PDFs, testimony documents, photographs, diagrams, and other attachments remain to be acquired and bound before final handoff."
+  ]
+}

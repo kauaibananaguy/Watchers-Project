@@ -1,0 +1,103 @@
+{
+  "package_id": "UFO-ATLAS-IMPORT-GEIPAN-SOURCE-SNAPSHOT-0.2.0",
+  "source_collection_id": "SRC-COLLECTION-GEIPAN",
+  "created_at": "2026-09-04T09:00:53Z",
+  "files": [
+    {
+      "path": "output/CASE_EXPORT_RECONCILIATION.jsonl",
+      "bytes": 911606,
+      "sha256": "c454c8ca138015e06384a9f10698a692de1c070c9b7142aa637d1c03e138b171"
+    },
+    {
+      "path": "output/GEIPAN_SOURCE_SNAPSHOT_v0.2.0.sqlite",
+      "bytes": 78839808,
+      "sha256": "e274b5c868dae7164c040a0ba4172eac957c59a4c77ebc0041a9f21bdc39adb5"
+    },
+    {
+      "path": "output/README_FIRST.md",
+      "bytes": 1269,
+      "sha256": "5f642a4c2a18d8c26958df88e3f6426b20a7ccbc72384305627610e3acc9cd5e"
+    },
+    {
+      "path": "output/SOURCE_COLLECTION.json",
+      "bytes": 1513,
+      "sha256": "eeff9c217d0cd46c120f5b2789c5e3c63597a72fd01e0a290f563d06660b9ab7"
+    },
+    {
+      "path": "output/SOURCE_FIELD_INVENTORY.csv",
+      "bytes": 27632,
+      "sha256": "69df0eff227b7bad08c928cb14dd5f95d849c4f4f4d6d9ab7491400bdb18de23"
+    },
+    {
+      "path": "output/SOURCE_FILE_INVENTORY.json",
+      "bytes": 11669,
+      "sha256": "7ddca05b045ca84e55579a0d48fb35bb1392f5c4492bcdc995e296a03980a901"
+    },
+    {
+      "path": "output/SOURCE_RECORD_LEDGER.csv",
+      "bytes": 70279177,
+      "sha256": "1ba23d891f753f026663c8060ae92d2f94b94b6adfbbc0a53155b62c784848eb"
+    },
+    {
+      "path": "output/SOURCE_RECORD_LEDGER.jsonl",
+      "bytes": 75258344,
+      "sha256": "48b44d7700256e0c305f59807fcf0727970d8bcb1890f245b921cd193738479c"
+    },
+    {
+      "path": "output/SOURCE_TABLE_PROFILES.json",
+      "bytes": 10145,
+      "sha256": "0dc73874e4504796695232d69cd934d568d67a4b22d5845838375eb9413416a8"
+    },
+    {
+      "path": "output/TESTIMONY_EXPORT_RECONCILIATION.jsonl",
+      "bytes": 2533388,
+      "sha256": "615b9b8788da5489556ca00a7ff63b726587a679f901dd115b23072b12af872a"
+    },
+    {
+      "path": "output/VALIDATION_REPORT.json",
+      "bytes": 1950,
+      "sha256": "b375808b1823f2cb11f1a1c3d696482e5d46996a04f47b4be012181177177451"
+    },
+    {
+      "path": "raw/GEIPAN_current_cases.xlsx",
+      "bytes": 1837707,
+      "sha256": "c760a79151793a65125916216aa1b4bad001352895e3791e5273b9ba73d000ab"
+    },
+    {
+      "path": "raw/GEIPAN_current_testimonies.xlsx",
+      "bytes": 680835,
+      "sha256": "45dcfddff8b6d56e9aaacb9cd4be48d191cfcdb1f8b706a1354db747c4349791"
+    },
+    {
+      "path": "raw/GEIPAN_database_history_2019-02-26.pdf",
+      "bytes": 360712,
+      "sha256": "8d4dc3201614783b32216cbb7b27ffa5f7b9965b9a42aba6d474cc7095e397d1"
+    },
+    {
+      "path": "raw/GEIPAN_database_update_page.html",
+      "bytes": 23247,
+      "sha256": "9f075686c32b8566dea86ed81a1e177f8b5bea2d0d88853faf63721308af88b4"
+    },
+    {
+      "path": "raw/GEIPAN_field_description_2019-01-07.xlsx",
+      "bytes": 592372,
+      "sha256": "51dd732720fcbfb84a4536ceb09faf700becd6bb04df1a2709dd81afd4e701ba"
+    },
+    {
+      "path": "raw/GEIPAN_legacy_cases_35_fields.csv",
+      "bytes": 3845660,
+      "sha256": "7a9fec49db88f218c825ef70370f25bca8f8a407fb6af1d0921e0ff85b823303"
+    },
+    {
+      "path": "raw/GEIPAN_legacy_testimonies_263_fields.csv",
+      "bytes": 5938725,
+      "sha256": "c2a2f27a6c8dadcdfa9e185d99e342db41d677dd4b4549facbe58235fbb7749e"
+    },
+    {
+      "path": "raw/GEIPAN_statistics_page.html",
+      "bytes": 27199,
+      "sha256": "e1cd37060b50cb63a73e8eded79323d49199d4909e08efa85e3453fc68687005"
+    }
+  ],
+  "manifest_note": "Manifest excludes its own self-hash."
+}

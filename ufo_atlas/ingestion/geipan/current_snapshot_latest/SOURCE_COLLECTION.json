@@ -1,0 +1,32 @@
+{
+  "source_collection_id": "SRC-COLLECTION-GEIPAN",
+  "collection_title": "GEIPAN published case and testimony database exports",
+  "attribution_name": "GEIPAN — Groupe d’études et d’informations sur les phénomènes aérospatiaux non identifiés",
+  "owner_custodian": "Centre national d’études spatiales (CNES)",
+  "source_type": "OFFICIAL_GOVERNMENT_DATABASE_EXPORT",
+  "acquisition_method": "Direct public download from official GEIPAN/CNES endpoints",
+  "acquired_at": "2026-09-04T09:00:53Z",
+  "gmr_version": "UFO Atlas GMR v1.0.0",
+  "integration_standard": "UFO-ATLAS-INT-STD-1.0.0",
+  "preliminary_master_reference": "UFO Atlas v0.6.0 at issuance; rebase against latest verified master at handoff",
+  "public_silo_flag": false,
+  "rights_and_privacy_notes": "GEIPAN publishes anonymized records and exports for public use. Preserve attribution, original French wording, source identifiers, and the source's coordinate/age generalization. Do not attempt to reverse anonymization.",
+  "source_file_count": 8,
+  "source_record_count": 17573,
+  "current_case_export_rows": 3381,
+  "current_testimony_export_rows": 6068,
+  "legacy_case_export_rows": 2768,
+  "legacy_testimony_export_rows": 5356,
+  "unique_case_ids_across_exports": 3392,
+  "unique_testimony_title_keys_across_exports": 6176,
+  "live_stats": {
+    "published_case_count": 3381,
+    "statistics_date_original": "11/08/2026",
+    "classification_counts": {
+      "A": 950,
+      "B": 1310,
+      "D": 106,
+      "C": 1015
+    }
+  }
+}
