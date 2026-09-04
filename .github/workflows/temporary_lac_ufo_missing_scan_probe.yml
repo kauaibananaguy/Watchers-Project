@@ -1,0 +1,88 @@
+name: Temporary LAC UFO missing scan probe
+
+on:
+  push:
+    paths:
+      - '.github/workflows/temporary_lac_ufo_missing_scan_probe.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Probe broken direct scan links and archive alternatives
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet requests beautifulsoup4
+          mkdir -p export
+          cat > /tmp/probe.py <<'PY'
+          import hashlib,json,re,urllib.parse,time
+          from pathlib import Path
+          import requests
+          from bs4 import BeautifulSoup
+
+          targets=[
+            {'isn':'37024','page':'8737','record':'37024-8737-6622','broken':'https://data2.collectionscanada.gc.ca/e/e121/e003000224.jpg'},
+            {'isn':'37024','page':'9370','record':'37024-9370-6999','broken':'https://data2.collectionscanada.gc.ca/e/e121/e003000891.jpg'},
+            {'isn':'4669','page':'184','record':'4669-184-0','broken':'https://data2.collectionscanada.gc.ca/e/e110/e002744464.jpg'},
+            {'isn':'4708','page':'2499','record':'4708-2499-0','broken':'https://data2.collectionscanada.gc.ca/e/e110/e002748480.jpg'},
+          ]
+          s=requests.Session(); s.headers.update({'User-Agent':'Mozilla/5.0'})
+          def get(url,timeout=60):
+            try:
+              r=s.get(url,timeout=timeout,allow_redirects=True)
+              return {'status':r.status_code,'url':r.url,'headers':dict(r.headers),'bytes':len(r.content),'sha256':hashlib.sha256(r.content).hexdigest(),'content':r.content}
+            except Exception as e:
+              return {'status':None,'url':url,'error':repr(e),'headers':{},'bytes':0,'sha256':'','content':b''}
+          report=[]
+          for t in targets:
+            image_page=f"https://www.collectionscanada.gc.ca/databases/ufo/001057-119.02-e.php?isn_id_nbr={t['isn']}&page_id_nbr={t['page']}&record_id={t['record']}&interval=50"
+            item_page=f"https://www.collectionscanada.gc.ca/databases/ufo/001057-119.01-e.php?isn_id_nbr={t['isn']}&page_id_nbr={t['page']}&record_id={t['record']}&interval=50"
+            ip=get(image_page); it=get(item_page)
+            html=(ip['content'] or b'').decode('latin-1',errors='replace')
+            urls=sorted(set(re.findall(r'https?://[^\"\'<>\s]+',html)))
+            soup=BeautifulSoup(html,'html.parser')
+            for tag in soup.find_all(['img','a'],src=True): urls.append(urllib.parse.urljoin(image_page,tag.get('src')))
+            for tag in soup.find_all('a',href=True): urls.append(urllib.parse.urljoin(image_page,tag.get('href')))
+            base=t['broken'].rsplit('.',1)[0]
+            candidates=[]
+            for ext in ['jpg','JPG','jpeg','JPEG','tif','TIF','tiff','TIFF','png','PNG','gif','GIF']:
+              candidates.append(base+'.'+ext)
+            # Probe nearby image serials because legacy image-page links occasionally point one image off.
+            m=re.search(r'(.*?/e)(\d{9})(\.[A-Za-z]+)$',t['broken'])
+            if m:
+              num=int(m.group(2))
+              for delta in range(-4,5):
+                if delta:
+                  candidates.append(f"{m.group(1)}{num+delta:09d}{m.group(3)}")
+            candidates.extend(urls)
+            seen=set(); probes=[]; success=[]
+            for url in candidates:
+              url=url.replace('&amp;','&')
+              if url.startswith('http://'): url='https://'+url[7:]
+              if url in seen or not url.startswith('http'): continue
+              seen.add(url)
+              if not any(x in url.lower() for x in ['data2.collectionscanada.gc.ca','collectionscanada.gc.ca']): continue
+              r=get(url,40)
+              ctype=(r.get('headers') or {}).get('content-type','')
+              row={'url':url,'status':r.get('status'),'bytes':r.get('bytes'),'content_type':ctype,'sha256':r.get('sha256'),'error':r.get('error','')}
+              probes.append(row)
+              if r.get('status')==200 and r.get('bytes',0)>1000 and ('image' in ctype.lower() or re.search(r'\.(?:jpg|jpeg|tif|tiff|png|gif)$',url,re.I)):
+                out=Path('export')/(t['record']+Path(urllib.parse.urlparse(url).path).suffix)
+                out.write_bytes(r['content']); success.append({'url':url,'file':out.name,'bytes':r['bytes'],'sha256':r['sha256']})
+              time.sleep(0.05)
+            report.append({'target':t,'image_page_status':ip['status'],'image_page_bytes':ip['bytes'],'item_page_status':it['status'],'item_page_bytes':it['bytes'],'html_urls':urls,'probes':probes,'successful_images':success})
+          Path('export/missing_scan_probe.json').write_text(json.dumps(report,indent=2),encoding='utf-8')
+          print(json.dumps([{'record':r['target']['record'],'success':r['successful_images'],'image_page_status':r['image_page_status']} for r in report],indent=2))
+          PY
+          python /tmp/probe.py
+      - name: Upload probe results
+        uses: actions/upload-artifact@v4
+        with:
+          name: lac-ufo-missing-scan-probe
+          path: export/
+          if-no-files-found: error
+          retention-days: 1
