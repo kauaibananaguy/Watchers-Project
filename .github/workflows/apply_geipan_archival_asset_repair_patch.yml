@@ -1,0 +1,83 @@
+name: Apply GEIPAN archival asset-repair patch
+
+on:
+  push:
+    paths:
+      - '.github/workflows/apply_geipan_archival_asset_repair_patch.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Route remands through live-variant and public-archive recovery
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          workflow = Path('.github/workflows/repair_geipan_linked_assets.yml')
+          text = workflow.read_text(encoding='utf-8')
+          old = 'python ufo_atlas/ingestion/geipan/crawl_assets_v1.py acquire \\\n'
+          new = 'python ufo_atlas/ingestion/geipan/acquire_assets_repair_v2.py acquire \\\n'
+          if text.count(old) != 1:
+              raise SystemExit(f'Expected one repair acquisition command, found {text.count(old)}')
+          workflow.write_text(text.replace(old, new), encoding='utf-8')
+
+          repair = Path('ufo_atlas/ingestion/geipan/repair_assets_v012.py')
+          text = repair.read_text(encoding='utf-8')
+
+          old_states = '''    "SOURCE_GONE_410",\n}\n'''
+          new_states = '''    "SOURCE_GONE_410",\n    "SOURCE_HOST_UNRESOLVABLE",\n    "SOURCE_MALFORMED_LINK",\n}\n'''
+          if text.count(old_states) != 1:
+              raise SystemExit('Could not locate terminal-state registry')
+          text = text.replace(old_states, new_states, 1)
+
+          old_map = '''    if "http error 410" in text or "status code 410" in text:\n        return "SOURCE_GONE_410"\n    return status\n'''
+          new_map = '''    if "http error 410" in text or "status code 410" in text:\n        return "SOURCE_GONE_410"\n    if "source_malformed_link" in text:\n        return "SOURCE_MALFORMED_LINK"\n    if (\n        "source_host_unresolvable" in text\n        or "name or service not known" in text\n        or "temporary failure in name resolution" in text\n        or "nodename nor servname" in text\n    ):\n        return "SOURCE_HOST_UNRESOLVABLE"\n    return status\n'''
+          if text.count(old_map) != 1:
+              raise SystemExit('Could not locate terminal-status mapper')
+          text = text.replace(old_map, new_map, 1)
+
+          old_sql = "'DOWNLOADED','SOURCE_NOT_AVAILABLE_404','SOURCE_FORBIDDEN_403','SOURCE_GONE_410'"
+          new_sql = "'DOWNLOADED','SOURCE_NOT_AVAILABLE_404','SOURCE_FORBIDDEN_403','SOURCE_GONE_410',\n          'SOURCE_HOST_UNRESOLVABLE','SOURCE_MALFORMED_LINK'"
+          count = text.count(old_sql)
+          if count < 3:
+              raise SystemExit(f'Expected at least three terminal SQL lists, found {count}')
+          text = text.replace(old_sql, new_sql)
+
+          old_policy = '''            "HTTP 403/404/410 after the configured retry wave is retained as an "\n            "explicit source-unavailable state; other failures remain blocking."\n'''
+          new_policy = '''            "Live URL variants and public archived captures are attempted before "\n            "HTTP 403/404/410, malformed links, or unresolvable retired hosts are "\n            "retained as explicit source-unavailable states; other failures remain blocking."\n'''
+          if text.count(old_policy) != 1:
+              raise SystemExit('Could not locate terminal-source policy text')
+          text = text.replace(old_policy, new_policy, 1)
+          repair.write_text(text, encoding='utf-8')
+          PY
+
+      - name: Compile changed Python and verify workflow routing
+        run: |
+          python -m py_compile \
+            ufo_atlas/ingestion/geipan/acquire_assets_repair_v2.py \
+            ufo_atlas/ingestion/geipan/repair_assets_v012.py
+          grep -F 'acquire_assets_repair_v2.py acquire' \
+            .github/workflows/repair_geipan_linked_assets.yml
+
+      - name: Commit the repair upgrade
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add \
+            .github/workflows/repair_geipan_linked_assets.yml \
+            ufo_atlas/ingestion/geipan/repair_assets_v012.py
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git commit -m 'Use archival recovery for GEIPAN asset remands [skip ci]'
+          git push
