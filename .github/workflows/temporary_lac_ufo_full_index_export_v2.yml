@@ -1,0 +1,245 @@
+name: Temporary LAC UFO full index export v2
+
+on:
+  push:
+    paths:
+      - '.github/workflows/temporary_lac_ufo_full_index_export_v2.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Crawl every LAC UFO database result in source order
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet beautifulsoup4 requests
+          mkdir -p export
+          python - <<'PY'
+          import csv, hashlib, json, re, time, urllib.parse
+          from pathlib import Path
+
+          import requests
+          from bs4 import BeautifulSoup
+
+          BASE='https://www.collectionscanada.gc.ca/databases/ufo/'
+          SEARCH_URL=BASE+'001057-100.01-e.php'
+          RESULTS_URL=BASE+'001057-110.01-e.php'
+          GROUPS=[
+              'Department of National Defence',
+              'Department of Transport',
+              'National Research Council',
+              'Royal Canadian Mounted Police',
+          ]
+
+          def clean(value):
+              return ' '.join((value or '').replace('\xa0',' ').split()).strip()
+
+          def get_session():
+              session=requests.Session()
+              session.headers.update({
+                  'User-Agent':'Mozilla/5.0 (compatible; WatchersProjectResearch/1.0; public archival acquisition)'
+              })
+              response=session.get(SEARCH_URL,timeout=90)
+              response.raise_for_status()
+              enc=response.encoding or response.apparent_encoding or 'latin-1'
+              soup=BeautifulSoup(response.content.decode(enc,errors='replace'),'html.parser')
+              tag=soup.find('input',{'name':'PHPSESSID'})
+              return session, (tag.get('value') if tag else None)
+
+          def parse_result_table(table, fallback_group, response_url, group_order, page_number, sk):
+              group_cell=table.select_one('td.td_data')
+              title_cell=table.select_one('td.td_data_records')
+              record_group=clean(group_cell.get_text(' ',strip=True).replace('Record Group:','',1)) if group_cell else fallback_group
+              document_title=clean(title_cell.get_text(' ',strip=True).replace('Document Title:','',1)) if title_cell else ''
+              rows=[]
+              # LAC alternates the enclosing row class by page; parse both families.
+              for container in table.select('div.alt_data_container, div.data_container'):
+                  anchor=container.find('a',href=lambda h: h and '001057-119.01' in h)
+                  if not anchor:
+                      continue
+                  record_id=clean(anchor.get_text(' ',strip=True))
+                  href=urllib.parse.urljoin(response_url,anchor.get('href'))
+                  parsed=urllib.parse.parse_qs(urllib.parse.urlparse(href).query)
+                  isn=(parsed.get('isn_id_nbr') or [''])[0]
+                  page_id=(parsed.get('page_id_nbr') or [''])[0]
+
+                  direct_divs=[d for d in container.find_all('div',recursive=False)]
+                  values=[clean(d.get_text(' ',strip=True)) for d in direct_divs]
+                  # Both class families contain exactly four direct children.
+                  if len(values)<4:
+                      # Fallback to numbered classes.
+                      values=[]
+                      for n in range(1,5):
+                          d=(container.select_one(f'div.alt_data{n}') or container.select_one(f'div.data{n}'))
+                          values.append(clean(d.get_text(' ',strip=True)) if d else '')
+                  location,sighting_date,document_date=(values+['','',''])[:3]
+                  if location.lower()=='[no location cited]': location=''
+                  if sighting_date.lower()=='[no date cited]': sighting_date=''
+                  if document_date.lower()=='[no date cited]': document_date=''
+
+                  item_url=BASE+'001057-119.01-e.php?'+urllib.parse.urlencode({
+                      'isn_id_nbr':isn,'page_id_nbr':page_id,'record_id':record_id,'interval':'50'
+                  })
+                  image_page_url=BASE+'001057-119.02-e.php?'+urllib.parse.urlencode({
+                      'isn_id_nbr':isn,'page_id_nbr':page_id,'record_id':record_id,'interval':'50'
+                  })
+                  rows.append({
+                      'source_collection_id':'SRC-COLLECTION-LAC-CANADAS-UFOS',
+                      'source_record_id':'LAC-UFO-'+record_id,
+                      'lac_record_number':record_id,
+                      'record_group':record_group,
+                      'document_title':document_title,
+                      'sighting_location_raw':location,
+                      'sighting_date_raw':sighting_date,
+                      'document_date_raw':document_date,
+                      'isn_id_nbr':isn,
+                      'page_id_nbr':page_id,
+                      'item_url':item_url,
+                      'image_page_url':image_page_url,
+                      'search_group_order':group_order,
+                      'search_page_number':page_number,
+                      'search_start_record':sk,
+                      'source_status':'INDEX_CAPTURED',
+                  })
+              return rows
+
+          all_rows=[]
+          pagination=[]
+          seen_global=set()
+          source_sequence=0
+
+          for group_order,group in enumerate(GROUPS,1):
+              session,sid=get_session()
+              sk=1
+              page_number=0
+              group_seen=set()
+              consecutive_empty=0
+              while True:
+                  page_number+=1
+                  params={'q7':group,'interval':'50'}
+                  if sk>1:
+                      params['sk']=str(sk)
+                  if sid:
+                      params['PHPSESSID']=sid
+                  response=session.get(RESULTS_URL,params=params,timeout=120)
+                  response.raise_for_status()
+                  enc=response.encoding or response.apparent_encoding or 'latin-1'
+                  html=response.content.decode(enc,errors='replace')
+                  soup=BeautifulSoup(html,'html.parser')
+
+                  page_rows=[]
+                  for table in soup.select('table.data_table'):
+                      page_rows.extend(parse_result_table(table,group,response.url,group_order,page_number,sk))
+
+                  unique_page=[]
+                  for row in page_rows:
+                      rid=row['lac_record_number']
+                      if not rid or rid in group_seen:
+                          continue
+                      group_seen.add(rid)
+                      source_sequence+=1
+                      row['source_sequence']=source_sequence
+                      unique_page.append(row)
+                      all_rows.append(row)
+                      seen_global.add(rid)
+
+                  next_sk=None
+                  for anchor in soup.find_all('a',href=True):
+                      if clean(anchor.get_text(' ',strip=True)).lower()!='next':
+                          continue
+                      query=urllib.parse.parse_qs(urllib.parse.urlparse(urllib.parse.urljoin(response.url,anchor['href'])).query)
+                      candidate=(query.get('sk') or [None])[0]
+                      if candidate and str(candidate).isdigit():
+                          next_sk=int(candidate)
+                          break
+
+                  pagination.append({
+                      'record_group':group,
+                      'group_order':group_order,
+                      'page_number':page_number,
+                      'sk':sk,
+                      'rows_parsed_before_dedup':len(page_rows),
+                      'new_rows_captured':len(unique_page),
+                      'group_rows_cumulative':len(group_seen),
+                      'next_sk':next_sk or '',
+                      'response_url':response.url,
+                      'response_bytes':len(response.content),
+                      'html_sha256':hashlib.sha256(response.content).hexdigest(),
+                  })
+                  print(f'{group}: page={page_number} sk={sk} parsed={len(page_rows)} new={len(unique_page)} cumulative={len(group_seen)} next={next_sk}',flush=True)
+
+                  if len(page_rows)==0:
+                      consecutive_empty+=1
+                  else:
+                      consecutive_empty=0
+                  if not next_sk or next_sk<=sk or consecutive_empty>=2:
+                      break
+                  sk=next_sk
+                  time.sleep(0.12)
+
+          if source_sequence != len(all_rows):
+              raise RuntimeError('Source sequence count mismatch')
+          if [r['source_sequence'] for r in all_rows] != list(range(1,len(all_rows)+1)):
+              raise RuntimeError('Non-continuous source sequence')
+
+          counts={}
+          for row in all_rows:
+              counts[row['lac_record_number']]=counts.get(row['lac_record_number'],0)+1
+          duplicates=[k for k,v in counts.items() if v>1]
+
+          fieldnames=['source_collection_id','source_sequence','source_record_id','lac_record_number','record_group','document_title','sighting_location_raw','sighting_date_raw','document_date_raw','isn_id_nbr','page_id_nbr','item_url','image_page_url','search_group_order','search_page_number','search_start_record','source_status']
+          with open('export/LAC_UFO_INDEX_SOURCE_LEDGER.csv','w',encoding='utf-8-sig',newline='') as handle:
+              writer=csv.DictWriter(handle,fieldnames=fieldnames)
+              writer.writeheader(); writer.writerows(all_rows)
+          with open('export/LAC_UFO_INDEX_SOURCE_LEDGER.jsonl','w',encoding='utf-8') as handle:
+              for row in all_rows:
+                  handle.write(json.dumps(row,ensure_ascii=False,sort_keys=True)+'\n')
+          with open('export/LAC_UFO_INDEX_PAGINATION_LEDGER.csv','w',encoding='utf-8-sig',newline='') as handle:
+              writer=csv.DictWriter(handle,fieldnames=list(pagination[0].keys()))
+              writer.writeheader(); writer.writerows(pagination)
+
+          group_counts={g:sum(1 for r in all_rows if r['record_group']==g) for g in GROUPS}
+          report={
+              'status':'COMPLETE_INDEX_CAPTURE',
+              'source_collection_id':'SRC-COLLECTION-LAC-CANADAS-UFOS',
+              'database_title':"Canada's UFOs: The Search for the Unknown",
+              'source_rows':len(all_rows),
+              'unique_lac_record_numbers':len(seen_global),
+              'duplicate_record_numbers_across_groups':duplicates,
+              'group_counts':group_counts,
+              'pagination_pages':len(pagination),
+              'first_source_record_id':all_rows[0]['source_record_id'] if all_rows else None,
+              'last_source_record_id':all_rows[-1]['source_record_id'] if all_rows else None,
+              'continuous_source_sequence':True,
+              'public_database_url':SEARCH_URL,
+              'note':'This is the acquisition index feeding the one central UFO Atlas database; it is not a separate public database or standalone module.'
+          }
+          Path('export/LAC_UFO_INDEX_CRAWL_REPORT.json').write_text(json.dumps(report,indent=2,ensure_ascii=False),encoding='utf-8')
+          Path('export/README_FIRST.md').write_text(
+              '# LAC Canada UFO Atlas GMR acquisition batch — index capture\n\n'
+              'These source rows are intended for direct transformation into the one central Watchers Project UFO Atlas database under GMR v1.0.0. '
+              'Library and Archives Canada remains source provenance only. This package is not a separate public database.\n',
+              encoding='utf-8'
+          )
+          PY
+          sha256sum export/* > export/SHA256SUMS.txt
+          python - <<'PY'
+          import hashlib,json
+          from pathlib import Path
+          files=[]
+          for p in sorted(Path('export').iterdir()):
+              if p.is_file():
+                  files.append({'path':p.name,'size_bytes':p.stat().st_size,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()})
+          Path('export/manifest.json').write_text(json.dumps({'files':files},indent=2),encoding='utf-8')
+          PY
+      - name: Upload corrected complete index acquisition
+        uses: actions/upload-artifact@v4
+        with:
+          name: lac-ufo-full-index-acquisition-v2
+          path: export/
+          if-no-files-found: error
+          retention-days: 3
