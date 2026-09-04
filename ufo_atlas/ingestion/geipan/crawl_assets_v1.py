@@ -301,6 +301,13 @@ def plan(args: argparse.Namespace) -> None:
 
 
 def acquire(args: argparse.Namespace) -> None:
+    # A repair plan is a second-pass remand set. Route only that input through
+    # live URL correction and public archival recovery; the primary acquisition
+    # remains unchanged and source URLs remain the asset identities.
+    if Path(args.assets).name == "repair_assets.json":
+        import acquire_assets_repair_v2 as recovery
+        shared.request_bytes = recovery.resilient_request_bytes
+
     assets = json.loads(Path(args.assets).read_text(encoding="utf-8"))
     subset = assets[args.start:args.end]
     out = Path(args.output_dir)

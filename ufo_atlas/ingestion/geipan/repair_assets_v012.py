@@ -22,6 +22,8 @@ TERMINAL_STATES = {
     "SOURCE_NOT_AVAILABLE_404",
     "SOURCE_FORBIDDEN_403",
     "SOURCE_GONE_410",
+    "SOURCE_HOST_UNRESOLVABLE",
+    "SOURCE_MALFORMED_LINK",
 }
 
 
@@ -114,6 +116,15 @@ def map_terminal_status(status: str, error: str | None) -> str:
         return "SOURCE_FORBIDDEN_403"
     if "http error 410" in text or "status code 410" in text:
         return "SOURCE_GONE_410"
+    if "source_malformed_link" in text:
+        return "SOURCE_MALFORMED_LINK"
+    if (
+        "source_host_unresolvable" in text
+        or "name or service not known" in text
+        or "temporary failure in name resolution" in text
+        or "nodename nor servname" in text
+    ):
+        return "SOURCE_HOST_UNRESOLVABLE"
     return status
 
 
@@ -267,7 +278,8 @@ def merge(args: argparse.Namespace) -> dict[str, Any]:
         """
         SELECT COUNT(*) FROM asset
         WHERE retrieval_status NOT IN (
-          'DOWNLOADED','SOURCE_NOT_AVAILABLE_404','SOURCE_FORBIDDEN_403','SOURCE_GONE_410'
+          'DOWNLOADED','SOURCE_NOT_AVAILABLE_404','SOURCE_FORBIDDEN_403','SOURCE_GONE_410',
+          'SOURCE_HOST_UNRESOLVABLE','SOURCE_MALFORMED_LINK'
         )
         """
     ).fetchone()[0]
@@ -313,8 +325,9 @@ def merge(args: argparse.Namespace) -> dict[str, Any]:
         "sqlite_quick_check": quick,
         "foreign_key_violations": foreign_keys,
         "terminal_source_policy": (
-            "HTTP 403/404/410 after the configured retry wave is retained as an "
-            "explicit source-unavailable state; other failures remain blocking."
+            "Live URL variants and public archived captures are attempted before "
+            "HTTP 403/404/410, malformed links, or unresolvable retired hosts are "
+            "retained as explicit source-unavailable states; other failures remain blocking."
         ),
     }
     (output_root / "REPAIR_SUMMARY.json").write_text(
@@ -329,7 +342,8 @@ def merge(args: argparse.Namespace) -> dict[str, Any]:
             SELECT asset_url,retrieval_status,final_url,byte_count,sha256,error
             FROM asset
             WHERE retrieval_status NOT IN (
-              'DOWNLOADED','SOURCE_NOT_AVAILABLE_404','SOURCE_FORBIDDEN_403','SOURCE_GONE_410'
+              'DOWNLOADED','SOURCE_NOT_AVAILABLE_404','SOURCE_FORBIDDEN_403','SOURCE_GONE_410',
+          'SOURCE_HOST_UNRESOLVABLE','SOURCE_MALFORMED_LINK'
             )
             ORDER BY asset_url
             """
