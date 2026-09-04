@@ -1,0 +1,49 @@
+name: Temporary LAC UFO pagination debug 2
+
+on:
+  push:
+    paths:
+      - '.github/workflows/temporary_lac_ufo_pagination_debug2.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Test LAC pagination without shared session
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet beautifulsoup4 requests
+          mkdir -p export
+          python - <<'PY'
+          import json, requests
+          from bs4 import BeautifulSoup
+          url='https://www.collectionscanada.gc.ca/databases/ufo/001057-110.01-e.php'
+          headers={'User-Agent':'Mozilla/5.0 (compatible; WatchersProjectResearch/1.0)'}
+          tests=[]
+          for mode in ['no_session','new_session_each']:
+            for sk in [1,51,101,151,201,251,301,351,401,451,501,551,601,651,701,751,801,851,901,931,951,981,1001,1051,1101]:
+              params={'q7':'Department of National Defence','brws_s':'','interval':'50','sk':str(sk)}
+              if mode=='new_session_each':
+                s=requests.Session(); s.headers.update(headers)
+                first=s.get('https://www.collectionscanada.gc.ca/databases/ufo/001057-100.01-e.php',timeout=60)
+                sp0=BeautifulSoup(first.content,'html.parser'); tag=sp0.find('input',{'name':'PHPSESSID'})
+                if tag: params['PHPSESSID']=tag.get('value')
+                r=s.get(url,params=params,timeout=90)
+              else:
+                r=requests.get(url,params=params,headers=headers,timeout=90)
+              sp=BeautifulSoup(r.content,'html.parser')
+              ids=[a.get_text(' ',strip=True) for a in sp.select('div.alt_data4 a[href]')]
+              tests.append({'mode':mode,'sk':sk,'count':len(ids),'ids':ids,'url':r.url})
+          open('export/pagination_debug2.json','w').write(json.dumps(tests,indent=2))
+          PY
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lac-ufo-pagination-debug2
+          path: export/
+          if-no-files-found: error
+          retention-days: 1
