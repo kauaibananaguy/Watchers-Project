@@ -1,0 +1,56 @@
+name: Temporary LAC UFO NRC partition probe
+
+on:
+  push:
+    paths:
+      - '.github/workflows/temporary_lac_ufo_nrc_partition_probe.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Probe NRC partition queries
+        run: |
+          set -euo pipefail
+          mkdir -p export
+          base='https://www.collectionscanada.gc.ca/databases/ufo/001057-110.01-e.php?interval=50&sk=0&q7=National+Research+Council'
+          declare -A queries
+          queries[doc_1947]="${base}&q8=1947"
+          queries[doc_1952]="${base}&q8=1952"
+          queries[doc_1967]="${base}&q8=1967"
+          queries[doc_1968]="${base}&q8=1968"
+          queries[doc_1970]="${base}&q8=1970"
+          queries[doc_1975]="${base}&q8=1975"
+          queries[doc_1980]="${base}&q8=1980"
+          queries[sight_1968]="${base}&q2=1968"
+          queries[title_herzberg]="${base}&q1=Herzberg"
+          queries[no_date_text]="${base}&q8=%5Bno+date+cited%5D"
+          for key in "${!queries[@]}"; do
+            curl --fail --location --retry 3 --user-agent 'Mozilla/5.0' "${queries[$key]}" -o "export/${key}.html"
+          done
+          python - <<'PY'
+          from pathlib import Path
+          import re,json,html
+          out=[]
+          for p in sorted(Path('export').glob('*.html')):
+              t=p.read_bytes().decode('latin-1',errors='replace')
+              ids=[]
+              for x in re.findall(r'record_id=([^&" ]+)',t):
+                  x=html.unescape(x)
+                  if re.match(r'\d+-\d+-\d+$',x) and x not in ids: ids.append(x)
+              nexts=re.findall(r'href="([^"]+)"[^>]*>Next</a>',t,re.I)
+              terms=re.findall(r'<div class="genapp_results_search_term">(.*?)</div>',t,re.I|re.S)
+              out.append({'query':p.stem,'rows_first_page':len(ids),'first':ids[0] if ids else None,'last':ids[-1] if ids else None,'has_next':bool(nexts),'next':html.unescape(nexts[0]) if nexts else None,'search_terms':re.sub('<[^>]+>',' ',html.unescape(terms[0])).strip() if terms else None})
+          Path('export/partition_summary.json').write_text(json.dumps(out,indent=2),encoding='utf-8')
+          print(json.dumps(out,indent=2))
+          PY
+      - name: Upload probe
+        uses: actions/upload-artifact@v4
+        with:
+          name: lac-ufo-nrc-partition-probe
+          path: export/
+          retention-days: 1
