@@ -1,0 +1,16 @@
+{
+  "overall_status": "PASS",
+  "expected_cases": 3381,
+  "case_page_rows": 3381,
+  "case_page_status_counts": {
+    "DOWNLOADED": 3381
+  },
+  "case_page_field_rows": 22590,
+  "case_asset_link_rows": 14733,
+  "unique_asset_urls": 7972,
+  "crawl_issues": 0,
+  "batch_count": 34,
+  "sqlite_quick_check": "ok",
+  "foreign_key_violations": 0,
+  "source_policy": "Official GEIPAN HTML and original French visible text are preserved without editorial replacement."
+}
