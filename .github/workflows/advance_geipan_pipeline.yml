@@ -1,0 +1,81 @@
+name: Advance GEIPAN ingestion pipeline
+
+on:
+  workflow_run:
+    workflows:
+      - 'Acquire GEIPAN case pages v2'
+      - 'Repair GEIPAN case page remands'
+      - 'Acquire GEIPAN linked case assets v2'
+      - 'Repair GEIPAN linked asset remands'
+      - 'Extract GEIPAN source features v2'
+      - 'Build GEIPAN enrichment input bundle v2'
+    types:
+      - completed
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: geipan-pipeline-advance-${{ github.event.workflow_run.name }}
+  cancel-in-progress: false
+
+jobs:
+  advance:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dispatch next stage without workflow_run chain-depth dependence
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPSTREAM_NAME: ${{ github.event.workflow_run.name }}
+          UPSTREAM_RUN_ID: ${{ github.event.workflow_run.id }}
+          UPSTREAM_UPDATED_AT: ${{ github.event.workflow_run.updated_at }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          recent_or_active() {
+            local workflow_file="$1"
+            local count
+            count="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/${workflow_file}/runs?per_page=20" \
+              --jq "[.workflow_runs[] | select((.status==\"queued\" or .status==\"in_progress\") or .created_at >= \"${UPSTREAM_UPDATED_AT}\")] | length")"
+            [ "$count" -gt 0 ]
+          }
+
+          dispatch_once() {
+            local workflow_file="$1"
+            shift
+            if recent_or_active "$workflow_file"; then
+              echo "Downstream workflow ${workflow_file} is already active or newer than the upstream completion; skipping duplicate dispatch."
+              return 0
+            fi
+            gh workflow run "$workflow_file" --ref main "$@"
+          }
+
+          case "$UPSTREAM_NAME" in
+            'Acquire GEIPAN case pages v2')
+              dispatch_once repair_geipan_case_pages.yml -f source_run_id="$UPSTREAM_RUN_ID"
+              ;;
+            'Repair GEIPAN case page remands')
+              dispatch_once acquire_geipan_linked_assets_v2.yml -f source_run_id="$UPSTREAM_RUN_ID"
+              ;;
+            'Acquire GEIPAN linked case assets v2')
+              dispatch_once repair_geipan_linked_assets.yml -f source_run_id="$UPSTREAM_RUN_ID"
+              ;;
+            'Repair GEIPAN linked asset remands')
+              dispatch_once extract_geipan_source_features_v2.yml -f asset_repair_run_id="$UPSTREAM_RUN_ID"
+              dispatch_once publish_geipan_raw_asset_shards.yml -f repair_run_id="$UPSTREAM_RUN_ID"
+              ;;
+            'Extract GEIPAN source features v2')
+              dispatch_once build_geipan_enrichment_input_bundle_v2.yml -f feature_run_id="$UPSTREAM_RUN_ID"
+              ;;
+            'Build GEIPAN enrichment input bundle v2')
+              dispatch_once publish_geipan_enrichment_bundle_release.yml -f source_run_id="$UPSTREAM_RUN_ID"
+              ;;
+            *)
+              echo "No configured downstream stage for ${UPSTREAM_NAME}."
+              ;;
+          esac
