@@ -16,7 +16,7 @@ concurrency:
 jobs:
   crawl:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
         with:
@@ -27,10 +27,10 @@ jobs:
       - name: Crawl and reconcile all current GEIPAN case listings
         working-directory: ufo_atlas/ingestion/geipan
         run: >-
-          python crawl_live_case_index.py
+          python crawl_live_case_index_resilient.py
           --output-dir live_index_output
           --package GEIPAN_LIVE_CASE_INDEX_v0.1.0.zip
-          --delay-seconds 0.2
+          --delay-seconds 5.0
       - name: Upload current live case index
         uses: actions/upload-artifact@v4
         with:
