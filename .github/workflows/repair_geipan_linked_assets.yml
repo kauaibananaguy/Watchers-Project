@@ -1,0 +1,265 @@
+name: Repair GEIPAN linked asset remands
+
+on:
+  workflow_run:
+    workflows:
+      - 'Acquire GEIPAN linked case assets v2'
+    types:
+      - completed
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: Successful GEIPAN linked-assets v2 run ID; blank uses latest successful run
+        required: false
+        default: ''
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: geipan-linked-asset-remand-repair
+  cancel-in-progress: false
+
+env:
+  PYTHONUNBUFFERED: '1'
+  REPAIR_BATCH_SIZE: '25'
+
+jobs:
+  plan:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      expected_assets: ${{ steps.plan.outputs.expected_assets }}
+      repair_queue_count: ${{ steps.plan.outputs.repair_queue_count }}
+      source_run_id: ${{ steps.resolve.outputs.source_run_id }}
+      source_artifact_id: ${{ steps.resolve.outputs.source_artifact_id }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - id: resolve
+        name: Resolve and download linked-asset aggregate
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_RUN_ID: ${{ github.event.workflow_run.id }}
+          INPUT_RUN_ID: ${{ inputs.source_run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUN_ID="${INPUT_RUN_ID:-${EVENT_RUN_ID:-}}"
+          if [ -z "$RUN_ID" ]; then
+            RUN_ID="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/acquire_geipan_linked_assets_v2.yml/runs?status=success&per_page=1" --jq '.workflow_runs[0].id')"
+          fi
+          test -n "$RUN_ID"
+          ARTIFACT_ID="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/artifacts?per_page=100" --jq '.artifacts[] | select(.name=="GEIPAN_LINKED_ASSET_METADATA_AND_TEXT_v0.1.1_REPAIRED_PAGES") | .id' | head -1)"
+          test -n "$ARTIFACT_ID"
+          curl --fail --location \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${ARTIFACT_ID}/zip" \
+            --output source-artifact.zip
+          mkdir -p source-artifact source-snapshot
+          unzip -q source-artifact.zip -d source-artifact
+          INNER="$(find source-artifact -type f -name 'GEIPAN_LINKED_ASSET_METADATA_AND_TEXT_v0.1.1_REPAIRED_PAGES.zip' -print -quit)"
+          test -n "$INNER"
+          unzip -q "$INNER" -d source-snapshot
+          DB="$(find source-snapshot -type f -name 'GEIPAN_LINKED_ASSET_METADATA_AND_TEXT_v0.1.0.sqlite' -print -quit)"
+          test -n "$DB"
+          echo "source_run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "source_artifact_id=$ARTIFACT_ID" >> "$GITHUB_OUTPUT"
+      - id: plan
+        name: Build immutable asset-remand repair plan
+        run: |
+          mkdir -p plan
+          python ufo_atlas/ingestion/geipan/repair_assets_v012.py plan \
+            --input-dir source-snapshot \
+            --output-dir plan \
+            --batch-size "$REPAIR_BATCH_SIZE"
+          echo "matrix=$(cat plan/matrix.json)" >> "$GITHUB_OUTPUT"
+          echo "expected_assets=$(python -c 'import json; print(json.load(open("plan/PLAN_SUMMARY.json"))["total_assets"])')" >> "$GITHUB_OUTPUT"
+          echo "repair_queue_count=$(python -c 'import json; print(json.load(open("plan/PLAN_SUMMARY.json"))["repair_queue_count"])')" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: geipan-asset-remand-repair-plan
+          path: plan/
+          if-no-files-found: error
+          retention-days: 90
+
+  repair:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install asset readers
+        run: >-
+          python -m pip install --disable-pip-version-check --no-cache-dir
+          'pypdf>=6,<7' 'Pillow>=11,<13' 'openpyxl>=3.1,<4' 'python-docx>=1.1,<2'
+      - uses: actions/download-artifact@v4
+        with:
+          name: geipan-asset-remand-repair-plan
+          path: plan
+      - id: names
+        shell: bash
+        run: |
+          printf -v PAD '%04d' '${{ matrix.batch_index }}'
+          echo "pad=${PAD}" >> "$GITHUB_OUTPUT"
+          echo "raw_shard=geipan-asset-repair-batch-${PAD}" >> "$GITHUB_OUTPUT"
+          echo "metadata_shard=geipan-asset-repair-metadata-${PAD}" >> "$GITHUB_OUTPUT"
+      - name: Retry explicit non-downloaded assets
+        run: |
+          OUT="repair-batch-${{ steps.names.outputs.pad }}"
+          python ufo_atlas/ingestion/geipan/crawl_assets_v1.py acquire \
+            --assets plan/repair_assets.json \
+            --batch-index '${{ matrix.batch_index }}' \
+            --start '${{ matrix.start }}' \
+            --end '${{ matrix.end }}' \
+            --output-dir "$OUT" \
+            --delay-seconds 20.0 \
+            --retries 12 \
+            --max-asset-bytes 2000000000 \
+            --max-batch-bytes 6000000000
+          find "$OUT/blobs" -type f -print0 | sort -z | xargs -0 -r sha256sum > "$OUT/RAW_ASSET_REPAIR_SHARD_MANIFEST.txt"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ${{ steps.names.outputs.raw_shard }}
+          path: |
+            repair-batch-${{ steps.names.outputs.pad }}/blobs/
+            repair-batch-${{ steps.names.outputs.pad }}/RAW_ASSET_REPAIR_SHARD_MANIFEST.txt
+          if-no-files-found: warn
+          compression-level: 6
+          retention-days: 90
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ${{ steps.names.outputs.metadata_shard }}
+          path: |
+            repair-batch-${{ steps.names.outputs.pad }}/*.sqlite
+            repair-batch-${{ steps.names.outputs.pad }}/BATCH_SUMMARY.json
+            repair-batch-${{ steps.names.outputs.pad }}/SHA256SUMS.txt
+            repair-batch-${{ steps.names.outputs.pad }}/RAW_ASSET_REPAIR_SHARD_MANIFEST.txt
+          if-no-files-found: warn
+          compression-level: 6
+          retention-days: 90
+
+  merge:
+    needs: [plan, repair]
+    if: always() && needs.plan.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Download original linked-asset aggregate
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_ARTIFACT_ID: ${{ needs.plan.outputs.source_artifact_id }}
+        run: |
+          set -euo pipefail
+          curl --fail --location \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${SOURCE_ARTIFACT_ID}/zip" \
+            --output source-artifact.zip
+          mkdir -p source-artifact source-snapshot
+          unzip -q source-artifact.zip -d source-artifact
+          INNER="$(find source-artifact -type f -name 'GEIPAN_LINKED_ASSET_METADATA_AND_TEXT_v0.1.1_REPAIRED_PAGES.zip' -print -quit)"
+          test -n "$INNER"
+          unzip -q "$INNER" -d source-snapshot
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: geipan-asset-repair-metadata-*
+          path: repair-results
+          merge-multiple: false
+      - name: Merge repairs and enforce terminal source adjudication
+        id: merge
+        continue-on-error: true
+        run: |
+          python ufo_atlas/ingestion/geipan/repair_assets_v012.py merge \
+            --original-dir source-snapshot \
+            --repairs-dir repair-results \
+            --output-dir repaired \
+            --expected-assets '${{ needs.plan.outputs.expected_assets }}'
+      - name: Package repaired asset result and diagnostics
+        if: always()
+        run: |
+          set -euo pipefail
+          test -f repaired/REPAIR_SUMMARY.json
+          (cd repaired && zip -q -r ../GEIPAN_LINKED_ASSET_METADATA_AND_TEXT_v0.1.2_REPAIRED.zip .)
+          sha256sum GEIPAN_LINKED_ASSET_METADATA_AND_TEXT_v0.1.2_REPAIRED.zip > \
+            GEIPAN_LINKED_ASSET_METADATA_AND_TEXT_v0.1.2_REPAIRED.zip.sha256
+          unzip -t GEIPAN_LINKED_ASSET_METADATA_AND_TEXT_v0.1.2_REPAIRED.zip >/dev/null
+      - name: Record repair raw-shard artifact identities
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100" > all-artifacts.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          payload=json.load(open('all-artifacts.json'))
+          artifacts=payload.get('artifacts',[]) if isinstance(payload,dict) else []
+          shards=[a for a in artifacts if str(a.get('name','')).startswith('geipan-asset-repair-batch-')]
+          Path('repaired/RAW_ASSET_REPAIR_SHARD_ARTIFACTS.json').write_text(json.dumps(shards,indent=2)+'\n',encoding='utf-8')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: GEIPAN_LINKED_ASSET_METADATA_AND_TEXT_v0.1.2_REPAIRED
+          path: |
+            GEIPAN_LINKED_ASSET_METADATA_AND_TEXT_v0.1.2_REPAIRED.zip
+            GEIPAN_LINKED_ASSET_METADATA_AND_TEXT_v0.1.2_REPAIRED.zip.sha256
+            repaired/REPAIR_SUMMARY.json
+            repaired/REMAINING_REMANDS.csv
+            repaired/RAW_ASSET_REPAIR_SHARD_ARTIFACTS.json
+          if-no-files-found: warn
+          compression-level: 0
+          retention-days: 90
+      - name: Enforce zero blocking asset remands
+        run: |
+          python - <<'PY'
+          import json
+          report=json.load(open('repaired/REPAIR_SUMMARY.json'))
+          if report.get('overall_status')!='PASS_ALL_ASSETS_TERMINALLY_ADJUDICATED':
+              raise SystemExit(json.dumps(report,indent=2))
+          if report.get('blocking_remands')!=0:
+              raise SystemExit(json.dumps(report,indent=2))
+          PY
+      - name: Preserve compact asset-repair evidence
+        run: |
+          set -euo pipefail
+          mkdir -p ufo_atlas/ingestion/geipan/assets_repaired_latest
+          cp repaired/REPAIR_SUMMARY.json ufo_atlas/ingestion/geipan/assets_repaired_latest/
+          cp repaired/REMAINING_REMANDS.csv ufo_atlas/ingestion/geipan/assets_repaired_latest/
+          cp repaired/RAW_ASSET_REPAIR_SHARD_ARTIFACTS.json ufo_atlas/ingestion/geipan/assets_repaired_latest/
+          cp GEIPAN_LINKED_ASSET_METADATA_AND_TEXT_v0.1.2_REPAIRED.zip.sha256 \
+            ufo_atlas/ingestion/geipan/assets_repaired_latest/PACKAGE_SHA256.txt
+          printf '%s\n' '${{ needs.plan.outputs.source_run_id }}' > \
+            ufo_atlas/ingestion/geipan/assets_repaired_latest/SOURCE_RUN_ID.txt
+          printf '%s\n' "${GITHUB_RUN_ID}" > \
+            ufo_atlas/ingestion/geipan/assets_repaired_latest/WORKFLOW_RUN_ID.txt
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add ufo_atlas/ingestion/geipan/assets_repaired_latest
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m 'Preserve repaired GEIPAN linked-asset evidence [skip ci]'
+          git push
