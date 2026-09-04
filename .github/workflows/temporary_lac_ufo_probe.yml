@@ -1,0 +1,70 @@
+name: Temporary LAC UFO archive probe
+
+on:
+  push:
+    paths:
+      - '.github/workflows/temporary_lac_ufo_probe.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Probe archived Library and Archives Canada UFO database
+        run: |
+          set -euo pipefail
+          mkdir -p export
+          python - <<'PY'
+          import json, re, urllib.parse
+          from pathlib import Path
+          import requests
+          from bs4 import BeautifulSoup
+
+          urls = [
+              'https://www.collectionscanada.gc.ca/databases/ufo/001057-100.01-e.php',
+              'https://www.collectionscanada.gc.ca/databases/ufo/001057-130-e.html',
+              'https://www.collectionscanada.gc.ca/ufo/index-e.html',
+              'https://www.bac-lac.gc.ca/eng/discover/unusual/ufo/Pages/GeoMaps.aspx',
+          ]
+          session = requests.Session()
+          session.headers.update({'User-Agent':'Mozilla/5.0 (compatible; WatchersProjectResearch/1.0)'})
+          report=[]
+          for i,url in enumerate(urls,1):
+              try:
+                  r=session.get(url,timeout=60,allow_redirects=True)
+                  raw=r.content
+                  enc=r.encoding or r.apparent_encoding or 'latin-1'
+                  try: text=raw.decode(enc,errors='replace')
+                  except Exception: text=raw.decode('latin-1',errors='replace')
+                  out=Path('export')/f'page_{i}.html'
+                  out.write_text(text,encoding='utf-8')
+                  soup=BeautifulSoup(text,'html.parser')
+                  forms=[]
+                  for f in soup.find_all('form'):
+                      forms.append({
+                          'action':urllib.parse.urljoin(r.url,f.get('action') or ''),
+                          'method':(f.get('method') or 'get').lower(),
+                          'inputs':[{'name':x.get('name'),'type':x.get('type'),'value':x.get('value')} for x in f.find_all(['input','select','button'])]
+                      })
+                  links=[]
+                  for a in soup.find_all('a',href=True):
+                      href=urllib.parse.urljoin(r.url,a['href'])
+                      txt=' '.join(a.get_text(' ',strip=True).split())
+                      if 'ufo' in href.lower() or '001057' in href or 'document' in href.lower() or 'database' in href.lower():
+                          links.append({'text':txt,'url':href})
+                  report.append({'requested_url':url,'final_url':r.url,'status':r.status_code,'content_type':r.headers.get('content-type'),'encoding':enc,'bytes':len(raw),'title':soup.title.get_text(' ',strip=True) if soup.title else None,'forms':forms,'selected_links':links[:100]})
+              except Exception as e:
+                  report.append({'requested_url':url,'error':repr(e)})
+          Path('export/probe_report.json').write_text(json.dumps(report,indent=2,ensure_ascii=False),encoding='utf-8')
+          PY
+          sha256sum export/* > export/SHA256SUMS.txt
+      - name: Upload probe artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lac-ufo-probe
+          path: export/
+          if-no-files-found: error
+          retention-days: 2
