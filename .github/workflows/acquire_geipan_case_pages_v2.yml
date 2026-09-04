@@ -5,6 +5,8 @@ on:
   push:
     paths:
       - '.github/workflows/acquire_geipan_case_pages_v2.yml'
+      - 'ufo_atlas/ingestion/geipan/crawl_case_packets_from_snapshot.py'
+      - 'ufo_atlas/ingestion/geipan/crawl_case_pages_v2.py'
 
 permissions:
   actions: read
@@ -12,7 +14,7 @@ permissions:
 
 concurrency:
   group: geipan-case-packet-acquisition
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 env:
   PYTHONUNBUFFERED: '1'
