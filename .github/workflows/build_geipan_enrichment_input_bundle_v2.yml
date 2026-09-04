@@ -1,0 +1,279 @@
+name: Build GEIPAN enrichment input bundle v2
+
+on:
+  workflow_run:
+    workflows:
+      - 'Extract GEIPAN source features v2'
+    types:
+      - completed
+  workflow_dispatch:
+    inputs:
+      feature_run_id:
+        description: Successful GEIPAN source-features v2 run ID; blank uses latest successful run
+        required: false
+        default: ''
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: geipan-enrichment-input-bundle-v2
+  cancel-in-progress: false
+
+env:
+  PYTHONUNBUFFERED: '1'
+  SOURCE_ARTIFACT_ID: '9930286890'
+
+jobs:
+  build:
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Resolve and download complete feature artifact
+        id: runs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_FEATURE_RUN_ID: ${{ github.event.workflow_run.id }}
+          INPUT_FEATURE_RUN_ID: ${{ inputs.feature_run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          FEATURE_RUN_ID="${INPUT_FEATURE_RUN_ID:-${EVENT_FEATURE_RUN_ID:-}}"
+          if [ -z "$FEATURE_RUN_ID" ]; then
+            FEATURE_RUN_ID="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/extract_geipan_source_features_v2.yml/runs?status=success&per_page=1" --jq '.workflow_runs[0].id')"
+          fi
+          test -n "$FEATURE_RUN_ID"
+          FEATURE_ARTIFACT_ID="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/runs/${FEATURE_RUN_ID}/artifacts?per_page=100" --jq '.artifacts[] | select(.name=="GEIPAN_SOURCE_FEATURE_ASSERTIONS_v0.2.0_COMPLETE") | .id' | head -1)"
+          test -n "$FEATURE_ARTIFACT_ID"
+          curl --fail --location \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${FEATURE_ARTIFACT_ID}/zip" \
+            --output feature-artifact.zip
+          mkdir -p feature-artifact extracted/features
+          unzip -q feature-artifact.zip -d feature-artifact
+          FEATURE_INNER="$(find feature-artifact -type f -name 'GEIPAN_SOURCE_FEATURE_ASSERTIONS_v0.2.0_COMPLETE.zip' -print -quit)"
+          test -n "$FEATURE_INNER"
+          unzip -q "$FEATURE_INNER" -d extracted/features
+          ASSET_RUN_ID="$(cat extracted/features/ASSET_REPAIR_RUN_ID.txt)"
+          PAGE_RUN_ID="$(cat extracted/features/PAGE_REPAIR_RUN_ID.txt)"
+          test -n "$ASSET_RUN_ID"
+          test -n "$PAGE_RUN_ID"
+          echo "feature_run_id=$FEATURE_RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "asset_run_id=$ASSET_RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "page_run_id=$PAGE_RUN_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Download source, repaired-page, and repaired-asset components
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ASSET_RUN_ID: ${{ steps.runs.outputs.asset_run_id }}
+          PAGE_RUN_ID: ${{ steps.runs.outputs.page_run_id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p downloads extracted/{source_snapshot,case_pages,assets}
+          download_by_id() {
+            local artifact_id="$1"
+            local destination="$2"
+            curl --fail --location \
+              -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" \
+              --output "$destination"
+          }
+          artifact_id_for_run() {
+            local run_id="$1"
+            local artifact_name="$2"
+            gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/artifacts?per_page=100" \
+              --jq ".artifacts[] | select(.name==\"${artifact_name}\") | .id" | head -1
+          }
+          download_by_id "$SOURCE_ARTIFACT_ID" downloads/source_outer.zip
+          PAGE_ARTIFACT_ID="$(artifact_id_for_run "$PAGE_RUN_ID" 'GEIPAN_CASE_PAGE_SOURCE_SNAPSHOT_v0.2.1_REPAIRED')"
+          ASSET_ARTIFACT_ID="$(artifact_id_for_run "$ASSET_RUN_ID" 'GEIPAN_LINKED_ASSET_METADATA_AND_TEXT_v0.1.2_REPAIRED')"
+          test -n "$PAGE_ARTIFACT_ID"
+          test -n "$ASSET_ARTIFACT_ID"
+          download_by_id "$PAGE_ARTIFACT_ID" downloads/pages_outer.zip
+          download_by_id "$ASSET_ARTIFACT_ID" downloads/assets_outer.zip
+
+          unpack_component() {
+            local outer="$1"
+            local expected_inner="$2"
+            local target="$3"
+            local staging="${target}_outer"
+            mkdir -p "$staging" "$target"
+            unzip -q "$outer" -d "$staging"
+            local inner
+            inner="$(find "$staging" -type f -name "$expected_inner" -print -quit)"
+            test -n "$inner"
+            unzip -q "$inner" -d "$target"
+          }
+          unpack_component downloads/source_outer.zip \
+            'UFO_ATLAS_IMPORT_GEIPAN_GMR1.0.0_v0.2.0_SOURCE_SNAPSHOT.zip' \
+            extracted/source_snapshot
+          unpack_component downloads/pages_outer.zip \
+            'GEIPAN_CASE_PAGE_SOURCE_SNAPSHOT_v0.2.1_REPAIRED.zip' \
+            extracted/case_pages
+          unpack_component downloads/assets_outer.zip \
+            'GEIPAN_LINKED_ASSET_METADATA_AND_TEXT_v0.1.2_REPAIRED.zip' \
+            extracted/assets
+
+          printf '%s\n' "$PAGE_ARTIFACT_ID" > PAGE_ARTIFACT_ID.txt
+          printf '%s\n' "$ASSET_ARTIFACT_ID" > ASSET_ARTIFACT_ID.txt
+
+      - name: Normalize successor component filenames for bundle builder
+        shell: bash
+        run: |
+          set -euo pipefail
+          PAGE_DB="$(find extracted/case_pages -type f -name 'GEIPAN_CASE_PAGE_SOURCE_SNAPSHOT_v0.2.1_REPAIRED.sqlite' -print -quit)"
+          ASSET_DB="$(find extracted/assets -type f -name 'GEIPAN_LINKED_ASSET_METADATA_AND_TEXT_v0.1.2_REPAIRED.sqlite' -print -quit)"
+          FEATURE_DB="$(find extracted/features -type f -name 'GEIPAN_SOURCE_FEATURE_ASSERTIONS_v0.2.0_COMPLETE.sqlite' -print -quit)"
+          test -n "$PAGE_DB"
+          test -n "$ASSET_DB"
+          test -n "$FEATURE_DB"
+          mv "$PAGE_DB" "$(dirname "$PAGE_DB")/GEIPAN_CASE_PAGE_SOURCE_SNAPSHOT_v0.2.0.sqlite"
+          mv "$ASSET_DB" "$(dirname "$ASSET_DB")/GEIPAN_LINKED_ASSET_METADATA_AND_TEXT_v0.1.0.sqlite"
+          mv "$FEATURE_DB" "$(dirname "$FEATURE_DB")/GEIPAN_SOURCE_FEATURE_ASSERTIONS_v0.1.0.sqlite"
+
+      - name: Build complete source-neutral enrichment-input bundle
+        run: |
+          python ufo_atlas/ingestion/geipan/build_enrichment_bundle_v040.py \
+            --source-snapshot extracted/source_snapshot \
+            --case-pages extracted/case_pages \
+            --assets extracted/assets \
+            --features extracted/features \
+            --output-dir bundle \
+            --source-artifact-id "$SOURCE_ARTIFACT_ID" \
+            --case-page-run-id '${{ steps.runs.outputs.page_run_id }}' \
+            --asset-run-id '${{ steps.runs.outputs.asset_run_id }}' \
+            --feature-run-id '${{ steps.runs.outputs.feature_run_id }}'
+
+      - name: Promote report to complete repaired-source v0.4.1
+        run: |
+          python - <<'PY'
+          import hashlib,json
+          from pathlib import Path
+          root=Path('bundle')
+          report=json.loads((root/'VALIDATION_REPORT.json').read_text(encoding='utf-8'))
+          terminal={'DOWNLOADED','SOURCE_NOT_AVAILABLE_404','SOURCE_FORBIDDEN_403','SOURCE_GONE_410'}
+          page_status=report['case_page_census']['status_counts']
+          asset_status=report['asset_census']['status_counts']
+          page_blocking={k:v for k,v in page_status.items() if k!='DOWNLOADED' and v}
+          asset_blocking={k:v for k,v in asset_status.items() if k not in terminal and v}
+          unavailable={k:v for k,v in asset_status.items() if k in terminal and k!='DOWNLOADED' and v}
+          if page_blocking or asset_blocking:
+              raise SystemExit(json.dumps({'page_blocking':page_blocking,'asset_blocking':asset_blocking},indent=2))
+          report['package_id']='UFO-ATLAS-GEIPAN-ENRICHMENT-INPUT-BUNDLE-0.4.1'
+          report['component_versions']={
+              'source_snapshot':'v0.2.0',
+              'case_pages':'v0.2.1 repaired',
+              'linked_assets':'v0.1.2 repaired',
+              'source_features':'v0.2.0 complete'
+          }
+          report['source_unavailable_terminal_states']=unavailable
+          report['source_remands']={
+              'blocking_case_page_remands':page_blocking,
+              'blocking_asset_remands':asset_blocking,
+              'terminal_source_unavailable_assets':unavailable
+          }
+          report['handoff_status']=(
+              'PASS_ENRICHMENT_INPUT_READY_WITH_EXPLICIT_SOURCE_UNAVAILABLE'
+              if unavailable else 'PASS_ENRICHMENT_INPUT_READY'
+          )
+          (root/'VALIDATION_REPORT.json').write_text(json.dumps(report,indent=2,ensure_ascii=False)+'\n',encoding='utf-8')
+          readme=(root/'README_FIRST.md').read_text(encoding='utf-8')
+          readme=readme.replace('v0.4.0','v0.4.1').replace('PASS_WITH_EXPLICIT_SOURCE_REMANDS',report['handoff_status'])
+          (root/'README_FIRST.md').write_text(readme,encoding='utf-8')
+          rows=[]
+          for path in sorted(root.rglob('*')):
+              if path.is_file() and path.name!='SHA256SUMS.txt':
+                  h=hashlib.sha256(path.read_bytes()).hexdigest()
+                  rows.append(f'{h}  {path.relative_to(root).as_posix()}')
+          (root/'SHA256SUMS.txt').write_text('\n'.join(rows)+'\n',encoding='utf-8')
+          PY
+
+      - name: Package and independently verify clean extraction
+        shell: bash
+        run: |
+          set -euo pipefail
+          PACKAGE='UFO_ATLAS_GEIPAN_ENRICHMENT_INPUT_BUNDLE_v0.4.1_COMPLETE.zip'
+          (cd bundle && zip -q -r "../${PACKAGE}" .)
+          sha256sum "$PACKAGE" > "${PACKAGE}.sha256"
+          unzip -t "$PACKAGE" >/dev/null
+          rm -rf fresh_verify
+          mkdir fresh_verify
+          unzip -q "$PACKAGE" -d fresh_verify
+          python - <<'PY'
+          import json,sqlite3
+          from pathlib import Path
+          root=Path('fresh_verify')
+          report=json.loads((root/'VALIDATION_REPORT.json').read_text(encoding='utf-8'))
+          if report.get('overall_status')!='PASS':
+              raise SystemExit('Bundle overall status is not PASS')
+          if not str(report.get('handoff_status','')).startswith('PASS_ENRICHMENT_INPUT_READY'):
+              raise SystemExit(json.dumps(report,indent=2))
+          if report['source_census']['physical_source_rows']!=17573:
+              raise SystemExit('Source-row mismatch')
+          if report['source_census']['unique_case_ids']!=3392:
+              raise SystemExit('Case-union mismatch')
+          if report['case_page_census']['case_pages']!=3381:
+              raise SystemExit('Case-page mismatch')
+          nested=[str(p.relative_to(root)) for p in root.rglob('*') if p.is_file() and p.suffix.lower() in {'.zip','.7z','.rar','.tar','.tgz'}]
+          if nested:
+              raise SystemExit(f'Nested archives: {nested}')
+          databases=list(root.rglob('*.sqlite'))
+          if len(databases)!=4:
+              raise SystemExit(f'Expected 4 databases, found {len(databases)}')
+          checks=[]
+          for db in databases:
+              con=sqlite3.connect(db)
+              quick=con.execute('PRAGMA quick_check').fetchone()[0]
+              fk=len(con.execute('PRAGMA foreign_key_check').fetchall())
+              con.close()
+              if quick!='ok' or fk:
+                  raise SystemExit(f'Database failed: {db} quick={quick} fk={fk}')
+              checks.append({'database':str(db.relative_to(root)),'quick_check':quick,'foreign_key_violations':fk})
+          (root/'FRESH_VERIFICATION.json').write_text(json.dumps({'status':'PASS','databases':checks,'nested_archives':nested},indent=2)+'\n',encoding='utf-8')
+          PY
+          cp fresh_verify/FRESH_VERIFICATION.json bundle/FRESH_VERIFICATION.json
+          (cd bundle && zip -q -u "../${PACKAGE}" FRESH_VERIFICATION.json)
+          sha256sum "$PACKAGE" > "${PACKAGE}.sha256"
+          unzip -t "$PACKAGE" >/dev/null
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: UFO_ATLAS_GEIPAN_ENRICHMENT_INPUT_BUNDLE_v0.4.1_COMPLETE
+          path: |
+            UFO_ATLAS_GEIPAN_ENRICHMENT_INPUT_BUNDLE_v0.4.1_COMPLETE.zip
+            UFO_ATLAS_GEIPAN_ENRICHMENT_INPUT_BUNDLE_v0.4.1_COMPLETE.zip.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 90
+
+      - name: Preserve compact complete-bundle evidence
+        run: |
+          set -euo pipefail
+          mkdir -p ufo_atlas/ingestion/geipan/enrichment_input_v2_latest
+          cp bundle/README_FIRST.md ufo_atlas/ingestion/geipan/enrichment_input_v2_latest/
+          cp bundle/VALIDATION_REPORT.json ufo_atlas/ingestion/geipan/enrichment_input_v2_latest/
+          cp bundle/SOURCE_COMPONENTS.json ufo_atlas/ingestion/geipan/enrichment_input_v2_latest/
+          cp bundle/FRESH_VERIFICATION.json ufo_atlas/ingestion/geipan/enrichment_input_v2_latest/
+          cp UFO_ATLAS_GEIPAN_ENRICHMENT_INPUT_BUNDLE_v0.4.1_COMPLETE.zip.sha256 \
+            ufo_atlas/ingestion/geipan/enrichment_input_v2_latest/PACKAGE_SHA256.txt
+          printf '%s\n' "${GITHUB_RUN_ID}" > ufo_atlas/ingestion/geipan/enrichment_input_v2_latest/WORKFLOW_RUN_ID.txt
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add ufo_atlas/ingestion/geipan/enrichment_input_v2_latest
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m 'Preserve complete GEIPAN enrichment-input bundle evidence [skip ci]'
+          git push
