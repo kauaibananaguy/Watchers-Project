@@ -36,7 +36,20 @@ jobs:
           --output-root ../../../snapshot
           --snapshot-date 2026-09-03
 
+      - name: Upload acquisition-format diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: GEIPAN_ACQUISITION_FORMAT_DIAGNOSTICS
+          path: |
+            snapshot/raw/
+            snapshot/headers/
+          if-no-files-found: warn
+          compression-level: 6
+          retention-days: 14
+
       - name: Upload official source snapshot
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: GEIPAN_OFFICIAL_SOURCE_SNAPSHOT_v0.1.0
@@ -48,6 +61,7 @@ jobs:
           retention-days: 90
 
       - name: Preserve compact acquisition evidence in repository
+        if: success()
         shell: bash
         run: |
           set -euo pipefail
