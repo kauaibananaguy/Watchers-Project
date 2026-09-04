@@ -16,6 +16,7 @@ jobs:
       - name: Fetch representative item and image pages
         run: |
           set -euo pipefail
+          python -m pip install --quiet beautifulsoup4
           mkdir -p export
           urls=(
             'https://www.collectionscanada.gc.ca/databases/ufo/001057-119.01-e.php?isn_id_nbr=13019&page_id_nbr=4382&record_id=13019-4382-12906&interval=50'
@@ -30,7 +31,7 @@ jobs:
           python - <<'PY'
           from pathlib import Path
           from bs4 import BeautifulSoup
-          import json, re, urllib.parse, subprocess, os
+          import json, re
           out=[]
           for p in sorted(Path('export').glob('page_*.html')):
               raw=p.read_bytes(); text=raw.decode('latin-1',errors='replace')
@@ -43,7 +44,6 @@ jobs:
                   href=tag.get('href'); label=' '.join(tag.get_text(' ',strip=True).split())
                   if any(x in (href or '').lower() for x in ['jpg','jpeg','gif','tif','tiff','pdf','001057','image','pic']):
                       links.append({'href':href,'label':label})
-              scripts='\n'.join(tag.get_text('\n') for tag in soup.find_all('script'))
               urlish=sorted(set(re.findall(r'https?://[^\s\"\'<>]+|[^\s\"\'<>]+\.(?:jpg|jpeg|gif|png|tif|tiff|pdf)(?:\?[^\s\"\'<>]*)?',text,re.I)))
               out.append({'file':p.name,'bytes':len(raw),'title':soup.title.get_text(' ',strip=True) if soup.title else None,'images':imgs,'links':links,'urlish':urlish[:100],'text_excerpt':' '.join(soup.get_text(' ',strip=True).split())[:3000]})
           Path('export/probe.json').write_text(json.dumps(out,indent=2,ensure_ascii=False),encoding='utf-8')
