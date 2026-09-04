@@ -16,15 +16,17 @@ jobs:
       - name: Probe archived Library and Archives Canada UFO database
         run: |
           set -euo pipefail
+          python -m pip install --quiet beautifulsoup4 requests
           mkdir -p export
           python - <<'PY'
-          import json, re, urllib.parse
+          import json, urllib.parse
           from pathlib import Path
           import requests
           from bs4 import BeautifulSoup
 
           urls = [
               'https://www.collectionscanada.gc.ca/databases/ufo/001057-100.01-e.php',
+              'http://www.collectionscanada.gc.ca/databases/ufo/001057-100.01-e.php',
               'https://www.collectionscanada.gc.ca/databases/ufo/001057-130-e.html',
               'https://www.collectionscanada.gc.ca/ufo/index-e.html',
               'https://www.bac-lac.gc.ca/eng/discover/unusual/ufo/Pages/GeoMaps.aspx',
@@ -44,18 +46,24 @@ jobs:
                   soup=BeautifulSoup(text,'html.parser')
                   forms=[]
                   for f in soup.find_all('form'):
+                      inputs=[]
+                      for x in f.find_all(['input','select','button']):
+                          item={'tag':x.name,'name':x.get('name'),'type':x.get('type'),'value':x.get('value')}
+                          if x.name=='select':
+                              item['options']=[{'value':o.get('value'),'text':' '.join(o.get_text(' ',strip=True).split())} for o in x.find_all('option')]
+                          inputs.append(item)
                       forms.append({
                           'action':urllib.parse.urljoin(r.url,f.get('action') or ''),
                           'method':(f.get('method') or 'get').lower(),
-                          'inputs':[{'name':x.get('name'),'type':x.get('type'),'value':x.get('value')} for x in f.find_all(['input','select','button'])]
+                          'inputs':inputs,
                       })
                   links=[]
                   for a in soup.find_all('a',href=True):
                       href=urllib.parse.urljoin(r.url,a['href'])
                       txt=' '.join(a.get_text(' ',strip=True).split())
-                      if 'ufo' in href.lower() or '001057' in href or 'document' in href.lower() or 'database' in href.lower():
+                      if 'ufo' in href.lower() or '001057' in href or 'document' in href.lower() or 'database' in href.lower() or 'geo' in href.lower():
                           links.append({'text':txt,'url':href})
-                  report.append({'requested_url':url,'final_url':r.url,'status':r.status_code,'content_type':r.headers.get('content-type'),'encoding':enc,'bytes':len(raw),'title':soup.title.get_text(' ',strip=True) if soup.title else None,'forms':forms,'selected_links':links[:100]})
+                  report.append({'requested_url':url,'final_url':r.url,'status':r.status_code,'content_type':r.headers.get('content-type'),'encoding':enc,'bytes':len(raw),'title':soup.title.get_text(' ',strip=True) if soup.title else None,'forms':forms,'selected_links':links[:250]})
               except Exception as e:
                   report.append({'requested_url':url,'error':repr(e)})
           Path('export/probe_report.json').write_text(json.dumps(report,indent=2,ensure_ascii=False),encoding='utf-8')
