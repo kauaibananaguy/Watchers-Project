@@ -1,0 +1,31 @@
+{
+  "collection": "GEIPAN",
+  "source_owner": "CNES / GEIPAN",
+  "atlas_role": "SOURCE_AND_PROVENANCE_ONLY",
+  "canonical_identity_owner": "CENTRAL_UFO_ATLAS_MASTER",
+  "source_languages": ["fr", "en"],
+  "stage": "OFFICIAL_SOURCE_ACQUISITION_AND_SCHEMA_CENSUS",
+  "official_entry_pages": [
+    "https://www.geipan.fr/en/stats",
+    "https://www.geipan.fr/fr/stats"
+  ],
+  "completed": [
+    "official entry pages preserved",
+    "machine-readable asset discovery initiated",
+    "source hashes and URL ledger created",
+    "logical table and column census created",
+    "provisional bilingual-to-UFO-Atlas field crosswalk created",
+    "source-side SQLite intake module created",
+    "source-order and raw-value preservation validation created"
+  ],
+  "next": [
+    "review official reuse and publication terms",
+    "adjudicate bilingual field crosswalk",
+    "classify case and testimony tables",
+    "construct source-neutral Atlas candidate records",
+    "preserve GEIPAN classifications as attributed claims",
+    "run central duplicate and identity matching",
+    "perform full handoff validation"
+  ],
+  "status": "ACTIVE_NO_USER_BLOCKER"
+}
