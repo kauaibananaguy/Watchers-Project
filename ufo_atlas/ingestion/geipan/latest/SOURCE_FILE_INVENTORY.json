@@ -1,0 +1,56 @@
+[
+  {
+    "file_id": "GEIPAN-FILE-001",
+    "file_name": "GEIPAN_database_update_page.html",
+    "source_url": "https://geipan.fr/fr/node/15",
+    "bytes": 23249,
+    "sha256": "d940a1f3e7baa622c1d2434ffbcc3d24c50e31eeaf9ef75c6a133448500f0c45",
+    "http_headers": "acquisition_method: LIVE_OFFICIAL\nrequested_url: https://www.geipan.fr/fr/actualites/mise-a-jour-csv\nfinal_url: https://www.geipan.fr/fr/actualites/mise-a-jour-csv\nDate: Fri, 04 Sep 2026 08:39:02 GMT\nServer: Apache\nStrict-Transport-Security: max-age=31536000; includeSubDomains; preload\nX-Content-Type-Options: nosniff\nX-Content-Type-Options: nosniff\nCache-Control: max-age=180, public\nX-Drupal-Dynamic-Cache: MISS\nContent-language: fr\nX-Frame-Options: SAMEORIGIN\nExpires: Sun, 19 Nov 1978 05:00:00 GMT\nLast-Modified: Fri, 04 Sep 2026 08:27:46 GMT\nETag: \"1788510466\"\nX-Generator: Drupal 11 (https://www.drupal.org)\nContent-Security-Policy-Report-Only: object-src 'none'; script-src 'self' https://d3js.org https://unpkg.com; script-src-attr 'self'; style-src 'self' https://unpkg.com; style-src-attr 'self'; frame-ancestors 'self'\nContent-Security-Policy: object-src 'none'; frame-ancestors 'self'\nContent-Length: 23249\nX-Drupal-Cache: HIT\nContent-Type: text/html; charset=UTF-8\nVia: 1.1 google\nSet-Cookie: GCLB=CKfb9p_1nq7vUxAD; path=/; HttpOnly; expires=Fri, 04-Sep-2026 08:44:02 GMT\nAlt-Svc: h3=\":443\"; ma=2592000,h3-29=\":443\"; ma=2592000\nConnection: close\n",
+    "acquired_at": "2026-09-04T08:39:01Z"
+  },
+  {
+    "file_id": "GEIPAN-FILE-002",
+    "file_name": "GEIPAN_cases.csv",
+    "source_url": "https://geipan.fr/sites/default/files/Base_de_donn%C3%A9es_des_cas.csv",
+    "bytes": 3845660,
+    "sha256": "7a9fec49db88f218c825ef70370f25bca8f8a407fb6af1d0921e0ff85b823303",
+    "http_headers": "acquisition_method: LIVE_OFFICIAL\nrequested_url: https://www.cnes-geipan.fr/sites/default/files/Base_de_donn%C3%A9es_des_cas.csv\nfinal_url: https://www.cnes-geipan.fr/sites/default/files/Base_de_donn%C3%A9es_des_cas.csv\nDate: Fri, 04 Sep 2026 08:39:02 GMT\nServer: Apache\nStrict-Transport-Security: max-age=31536000; includeSubDomains; preload\nX-Content-Type-Options: nosniff\nLast-Modified: Fri, 19 Feb 2021 09:32:20 GMT\nETag: \"3aae1c-5bbad20f9bcaa\"\nAccept-Ranges: bytes\nContent-Length: 3845660\nCache-Control: max-age=1209600\nExpires: Fri, 18 Sep 2026 08:39:02 GMT\nContent-Type: text/csv\nVia: 1.1 google\nSet-Cookie: GCLB=CKKjqv-T-ZnysAEQAw; path=/; HttpOnly; expires=Fri, 04-Sep-2026 08:44:02 GMT\nAlt-Svc: h3=\":443\"; ma=2592000,h3-29=\":443\"; ma=2592000\nConnection: close\n",
+    "acquired_at": "2026-09-04T08:39:01Z"
+  },
+  {
+    "file_id": "GEIPAN-FILE-003",
+    "file_name": "GEIPAN_testimonies_observations.csv",
+    "source_url": "https://geipan.fr/sites/default/files/Base_de_donn%C3%A9es_des_t%C3%A9moignages.csv",
+    "bytes": 5938725,
+    "sha256": "c2a2f27a6c8dadcdfa9e185d99e342db41d677dd4b4549facbe58235fbb7749e",
+    "http_headers": "acquisition_method: LIVE_OFFICIAL\nrequested_url: https://www.cnes-geipan.fr/sites/default/files/Base_de_donn%C3%A9es_des_t%C3%A9moignages.csv\nfinal_url: https://www.cnes-geipan.fr/sites/default/files/Base_de_donn%C3%A9es_des_t%C3%A9moignages.csv\nDate: Fri, 04 Sep 2026 08:39:04 GMT\nServer: Apache\nStrict-Transport-Security: max-age=31536000; includeSubDomains; preload\nX-Content-Type-Options: nosniff\nLast-Modified: Fri, 19 Feb 2021 09:32:20 GMT\nETag: \"5a9e25-5bbad20fe8b35\"\nAccept-Ranges: bytes\nContent-Length: 5938725\nCache-Control: max-age=1209600\nExpires: Fri, 18 Sep 2026 08:39:04 GMT\nContent-Type: text/csv\nVia: 1.1 google\nSet-Cookie: GCLB=CJ_uiODOgsf0_gEQAw; path=/; HttpOnly; expires=Fri, 04-Sep-2026 08:44:04 GMT\nAlt-Svc: h3=\":443\"; ma=2592000,h3-29=\":443\"; ma=2592000\nConnection: close\n",
+    "acquired_at": "2026-09-04T08:39:01Z"
+  },
+  {
+    "file_id": "GEIPAN-FILE-004",
+    "file_name": "GEIPAN_table_field_description_2019-01-07.xlsx",
+    "source_url": "https://geipan.fr/sites/default/files/Description_des_tables_et_champs_de_donn%C3%A9es_de_la_base_du_geipan_2019-01-07.xlsx",
+    "bytes": 592372,
+    "sha256": "51dd732720fcbfb84a4536ceb09faf700becd6bb04df1a2709dd81afd4e701ba",
+    "http_headers": "acquisition_method: LIVE_OFFICIAL\nrequested_url: https://www.cnes-geipan.fr/sites/default/files/Description_des_tables_et_champs_de_donn%C3%A9es_de_la_base_du_geipan_2019-01-07.xlsx\nfinal_url: https://www.cnes-geipan.fr/sites/default/files/Description_des_tables_et_champs_de_donn%C3%A9es_de_la_base_du_geipan_2019-01-07.xlsx\nDate: Fri, 04 Sep 2026 08:39:06 GMT\nServer: Apache\nStrict-Transport-Security: max-age=31536000; includeSubDomains; preload\nX-Content-Type-Options: nosniff\nLast-Modified: Fri, 19 Feb 2021 09:32:20 GMT\nAccept-Ranges: bytes\nContent-Length: 592372\nCache-Control: max-age=1209600\nExpires: Fri, 18 Sep 2026 08:39:06 GMT\nContent-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet\nVia: 1.1 google\nSet-Cookie: GCLB=CL7OztWnu9nknQEQAw; path=/; HttpOnly; expires=Fri, 04-Sep-2026 08:44:06 GMT\nAlt-Svc: h3=\":443\"; ma=2592000\nConnection: close\n",
+    "acquired_at": "2026-09-04T08:39:01Z"
+  },
+  {
+    "file_id": "GEIPAN-FILE-005",
+    "file_name": "GEIPAN_database_history_2019-02-26.pdf",
+    "source_url": "https://geipan.fr/sites/default/files/2019-02-26_Historique_des_bases_au_GEIPAN.pdf",
+    "bytes": 360712,
+    "sha256": "8d4dc3201614783b32216cbb7b27ffa5f7b9965b9a42aba6d474cc7095e397d1",
+    "http_headers": "acquisition_method: LIVE_OFFICIAL\nrequested_url: https://www.cnes-geipan.fr/sites/default/files/2019-02-26_Historique_des_bases_au_GEIPAN.pdf\nfinal_url: https://www.cnes-geipan.fr/sites/default/files/2019-02-26_Historique_des_bases_au_GEIPAN.pdf\nDate: Fri, 04 Sep 2026 08:39:07 GMT\nServer: Apache\nStrict-Transport-Security: max-age=31536000; includeSubDomains; preload\nX-Content-Type-Options: nosniff\nLast-Modified: Fri, 19 Feb 2021 09:32:20 GMT\nAccept-Ranges: bytes\nContent-Length: 360712\nCache-Control: max-age=1209600\nExpires: Fri, 18 Sep 2026 08:39:07 GMT\nContent-Type: application/pdf\nVia: 1.1 google\nSet-Cookie: GCLB=CLHpiaH056bHZhAD; path=/; HttpOnly; expires=Fri, 04-Sep-2026 08:44:07 GMT\nAlt-Svc: h3=\":443\"; ma=2592000\nConnection: close\n",
+    "acquired_at": "2026-09-04T08:39:01Z"
+  },
+  {
+    "file_id": "GEIPAN-FILE-006",
+    "file_name": "GEIPAN_statistics_page.html",
+    "source_url": "https://geipan.fr/fr/stats",
+    "bytes": 27201,
+    "sha256": "5469dc1b6800ecbb9e81d391c492ebfb8cdbb3a469e0bdc6689a88db70e937fa",
+    "http_headers": "acquisition_method: LIVE_OFFICIAL\nrequested_url: https://www.geipan.fr/fr/stats\nfinal_url: https://www.geipan.fr/fr/stats\nDate: Fri, 04 Sep 2026 08:39:08 GMT\nServer: Apache\nStrict-Transport-Security: max-age=31536000; includeSubDomains; preload\nX-Content-Type-Options: nosniff\nX-Content-Type-Options: nosniff\nCache-Control: max-age=180, public\nX-Drupal-Dynamic-Cache: MISS\nContent-language: fr\nX-Frame-Options: SAMEORIGIN\nExpires: Sun, 19 Nov 1978 05:00:00 GMT\nLast-Modified: Fri, 04 Sep 2026 08:27:53 GMT\nETag: \"1788510473\"\nX-Generator: Drupal 11 (https://www.drupal.org)\nContent-Security-Policy-Report-Only: object-src 'none'; script-src 'self' https://d3js.org https://unpkg.com; script-src-attr 'self'; style-src 'self' https://unpkg.com; style-src-attr 'self'; frame-ancestors 'self'\nContent-Security-Policy: object-src 'none'; frame-ancestors 'self'\nContent-Length: 27201\nX-Drupal-Cache: HIT\nContent-Type: text/html; charset=UTF-8\nVia: 1.1 google\nSet-Cookie: GCLB=CKeuzoTczOD3WhAD; path=/; HttpOnly; expires=Fri, 04-Sep-2026 08:44:08 GMT\nAlt-Svc: h3=\":443\"; ma=2592000,h3-29=\":443\"; ma=2592000\nConnection: close\n",
+    "acquired_at": "2026-09-04T08:39:01Z"
+  }
+]

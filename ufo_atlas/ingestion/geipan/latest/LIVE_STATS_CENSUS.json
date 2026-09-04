@@ -1,0 +1,12 @@
+{
+  "published_case_count": 3381,
+  "statistics_date_original": "11/08/2026",
+  "classification_counts": {
+    "A": 950,
+    "B": 1310,
+    "D": 106,
+    "C": 1015
+  },
+  "source_file": "GEIPAN_statistics_page.html",
+  "parse_status": "PARSED"
+}

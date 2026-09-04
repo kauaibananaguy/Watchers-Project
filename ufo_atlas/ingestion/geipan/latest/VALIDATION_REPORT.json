@@ -1,0 +1,31 @@
+{
+  "overall_status": "PASS",
+  "stage": "SOURCE_ACQUISITION_AND_CENSUS",
+  "sqlite_quick_check": "ok",
+  "foreign_key_violations": 0,
+  "duplicate_source_record_ids": 0,
+  "source_sequence_min": 1,
+  "source_sequence_max": 8124,
+  "source_sequence_distinct_count": 8124,
+  "source_record_count": 8124,
+  "case_row_count": 2768,
+  "testimony_observation_row_count": 5356,
+  "source_files": 6,
+  "candidate_records_built": 0,
+  "gmr_transformation_started": false,
+  "next_stage": "SOURCE_FIELD_MAPPING_AND_CANONICAL_CANDIDATE_CONSTRUCTION",
+  "known_limitations": [
+    "This is an acquisition/census checkpoint, not a completed GMR import module.",
+    "The official CSV export intentionally omits confidential witness and internal workflow fields.",
+    "Full free-form narratives and some weather/aviation supplemental tables may not be present in the downloadable CSV export.",
+    "The official field-description XLSX has malformed ZIP offsets and could not be parsed by openpyxl; the raw file and all CSV headers are preserved.",
+    "The downloadable case CSV contains 2768 rows while the live GEIPAN statistics page reports 3381 published cases; live-site acquisition is required for the remaining 613 cases."
+  ],
+  "schema_workbook_parse_status": "RAW_FILE_PRESERVED_PARSE_ERROR",
+  "schema_workbook_parse_error": "OSError: [Errno 22] Invalid argument",
+  "live_published_case_count": 3381,
+  "live_statistics_date_original": "11/08/2026",
+  "static_csv_case_gap_relative_to_live_site": 613,
+  "scope_completion_status": "STATIC_EXPORT_ACQUIRED_LIVE_SITE_EXPANSION_REQUIRED",
+  "package_sha256": "ee7e76b0c8d0e9eea66e16c32f5577a41ee281704bf0ef742b837f7a8e3d7f39"
+}

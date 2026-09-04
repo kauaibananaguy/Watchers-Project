@@ -1,0 +1,7 @@
+{
+  "sheets": [],
+  "parse_status": "RAW_FILE_PRESERVED_PARSE_ERROR",
+  "parse_error": "OSError: [Errno 22] Invalid argument",
+  "raw_file_sha256": "51dd732720fcbfb84a4536ceb09faf700becd6bb04df1a2709dd81afd4e701ba",
+  "recovery_note": "The official workbook is preserved byte-for-byte. CSV headers remain sufficient to begin source-field mapping; the workbook will be reparsed from an alternate official or archived copy if available."
+}
