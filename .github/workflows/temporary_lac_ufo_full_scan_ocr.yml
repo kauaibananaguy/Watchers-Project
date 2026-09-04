@@ -1,0 +1,190 @@
+name: Temporary LAC UFO full scan acquisition and OCR
+
+on:
+  push:
+    paths:
+      - '.github/workflows/temporary_lac_ufo_full_scan_ocr.yml'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  process:
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        chunk: [0, 1, 2, 3, 4, 5, 6, 7]
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Download complete LAC metadata union
+        uses: actions/download-artifact@v4
+        with:
+          name: lac-ufo-complete-metadata-union
+          path: metadata
+          github-token: ${{ github.token }}
+          repository: kauaibananaguy/Watchers-Project
+          run-id: 33924142848
+      - name: Install OCR dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq tesseract-ocr tesseract-ocr-eng tesseract-ocr-fra
+          python -m pip install --quiet requests beautifulsoup4 pillow
+      - name: Acquire, hash, and OCR this scan partition
+        env:
+          CHUNK: ${{ matrix.chunk }}
+          CHUNK_COUNT: 8
+          OMP_THREAD_LIMIT: 1
+          OMP_NUM_THREADS: 1
+        run: |
+          set -euo pipefail
+          mkdir -p output
+          cat > /tmp/process_lac_scans.py <<'PY'
+          from __future__ import annotations
+          import csv, hashlib, json, os, re, subprocess, tempfile, threading, time, urllib.parse
+          from collections import defaultdict
+          from concurrent.futures import ThreadPoolExecutor, as_completed
+          from datetime import datetime, timezone
+          from pathlib import Path
+          import requests
+          from bs4 import BeautifulSoup
+          from PIL import Image
+
+          CHUNK=int(os.environ['CHUNK']); CHUNK_COUNT=int(os.environ['CHUNK_COUNT'])
+          source_csv=next(Path('metadata').rglob('LAC_UFO_SOURCE_INDEX.csv'))
+          outdir=Path('output'); outdir.mkdir(exist_ok=True)
+          UA='Mozilla/5.0 (compatible; WatchersProject-UFOAtlas/1.0; archival research)'
+          local=threading.local()
+
+          def session():
+              if not hasattr(local,'session'):
+                  s=requests.Session(); s.headers.update({'User-Agent':UA}); local.session=s
+              return local.session
+
+          def sha256_bytes(data): return hashlib.sha256(data).hexdigest()
+          def score_text(text):
+              return len(text.strip()) + 3*sum(ch.isalpha() for ch in text) + sum(ch.isdigit() for ch in text)
+          def request(url,timeout=90):
+              last=None
+              for attempt in range(6):
+                  try:
+                      r=session().get(url,timeout=timeout,allow_redirects=True)
+                      r.raise_for_status(); return r
+                  except Exception as exc:
+                      last=exc; time.sleep(min(12,1.5*(attempt+1)))
+              raise RuntimeError(f'{url}: {last}')
+          def scan_url_from_page(url):
+              r=request(url,90)
+              text=r.content.decode('latin-1',errors='replace')
+              m=re.search(r'https?://data2\.collectionscanada\.gc\.ca/[^\"\'<>\s]+?\.(?:jpe?g|png|tiff?)',text,re.I)
+              direct=m.group(0) if m else None
+              if not direct:
+                  soup=BeautifulSoup(text,'html.parser')
+                  for tag in soup.find_all('img',src=True):
+                      candidate=urllib.parse.urljoin(url,tag['src'])
+                      if 'data2.collectionscanada.gc.ca' in candidate and re.search(r'\.(?:jpe?g|png|tiff?)$',urllib.parse.urlparse(candidate).path,re.I):
+                          direct=candidate; break
+              if not direct: raise RuntimeError('No LAC scan image URL found')
+              direct=direct.replace('&amp;','&')
+              if direct.startswith('http://'): direct='https://'+direct[len('http://'):]
+              return direct, sha256_bytes(r.content), len(r.content)
+          def ocr_image(data,extension):
+              with tempfile.TemporaryDirectory(prefix='lacocr_') as td:
+                  img_path=Path(td)/('scan'+extension)
+                  img_path.write_bytes(data)
+                  attempts=[]
+                  for psm in ('6','3'):
+                      cmd=['tesseract',str(img_path),'stdout','-l','eng+fra','--oem','1','--psm',psm,'-c','preserve_interword_spaces=1']
+                      proc=subprocess.run(cmd,capture_output=True,timeout=90)
+                      text=proc.stdout.decode('utf-8',errors='replace').replace('\x0c','').strip()
+                      attempts.append((score_text(text),psm,text,proc.stderr.decode('utf-8',errors='replace')[-1000:]))
+                      if psm=='6' and len(text)>350 and sum(ch.isalpha() for ch in text)>180:
+                          break
+                  best=max(attempts,key=lambda x:x[0])
+                  return best[2],f'tesseract-eng+fra-oem1-psm{best[1]}',best[3]
+
+          with source_csv.open('r',encoding='utf-8-sig',newline='') as f:
+              rows=list(csv.DictReader(f))
+          scan_to_rows=defaultdict(list)
+          for row in rows:
+              scan_to_rows[(row['isn_id_nbr'],row['page_id_nbr'])].append(row)
+          selected=[]
+          for key,members in scan_to_rows.items():
+              if (int(key[0])+int(key[1]))%CHUNK_COUNT==CHUNK:
+                  selected.append((key,sorted(members,key=lambda r:int(r['source_sequence']))))
+          selected.sort(key=lambda item:min(int(r['source_sequence']) for r in item[1]))
+
+          def process(item):
+              (isn,page),members=item
+              representative=members[0]; record_id=representative['portal_record_id']; image_page=representative['image_view_url']
+              scan_id=f'LAC-SCAN-{isn}-{page}'; started=time.time()
+              base={
+                  'chunk':CHUNK,'scan_id':scan_id,'isn_id_nbr':isn,'page_id_nbr':page,
+                  'representative_portal_record_id':record_id,
+                  'portal_record_ids':' | '.join(r['portal_record_id'] for r in members),
+                  'source_record_ids':' | '.join(r['source_record_id'] for r in members),
+                  'source_sequences':' | '.join(r['source_sequence'] for r in members),
+                  'source_record_count':len(members),'image_page_url':image_page,
+              }
+              try:
+                  direct,page_sha,page_bytes=scan_url_from_page(image_page)
+                  ir=request(direct,120); data=ir.content
+                  if len(data)<1000: raise RuntimeError(f'Scan payload too small: {len(data)}')
+                  suffix=Path(urllib.parse.urlparse(direct).path).suffix.lower() or '.jpg'
+                  with tempfile.NamedTemporaryFile(suffix=suffix,delete=False) as tmp:
+                      tmp.write(data); tmp_path=tmp.name
+                  try:
+                      with Image.open(tmp_path) as im: width,height,mode,fmt=im.width,im.height,im.mode,im.format
+                  finally: Path(tmp_path).unlink(missing_ok=True)
+                  text,method,stderr=ocr_image(data,suffix)
+                  return {**base,'status':'COMPLETE','scan_url':direct,'image_page_sha256':page_sha,'image_page_bytes':page_bytes,
+                      'scan_sha256':sha256_bytes(data),'scan_bytes':len(data),'content_type':ir.headers.get('content-type',''),
+                      'image_width':width,'image_height':height,'image_mode':mode,'image_format':fmt,'ocr_method':method,
+                      'ocr_text':text,'ocr_text_sha256':sha256_bytes(text.encode('utf-8')),'ocr_characters':len(text),
+                      'ocr_error':'','ocr_stderr':stderr,'elapsed_seconds':round(time.time()-started,3),'acquired_at':datetime.now(timezone.utc).isoformat()}
+              except Exception as exc:
+                  return {**base,'status':'ERROR','scan_url':'','image_page_sha256':'','image_page_bytes':'','scan_sha256':'','scan_bytes':'',
+                      'content_type':'','image_width':'','image_height':'','image_mode':'','image_format':'','ocr_method':'','ocr_text':'',
+                      'ocr_text_sha256':'','ocr_characters':0,'ocr_error':repr(exc),'ocr_stderr':'','elapsed_seconds':round(time.time()-started,3),
+                      'acquired_at':datetime.now(timezone.utc).isoformat()}
+
+          results=[]; total=len(selected)
+          with ThreadPoolExecutor(max_workers=2) as pool:
+              futures=[pool.submit(process,item) for item in selected]
+              for completed,fut in enumerate(as_completed(futures),1):
+                  results.append(fut.result())
+                  if completed==1 or completed%50==0 or completed==total:
+                      errors=sum(r['status']!='COMPLETE' for r in results)
+                      print(f'chunk {CHUNK}: {completed}/{total} scans; errors={errors}',flush=True)
+          results.sort(key=lambda r:min(int(x) for x in r['source_sequences'].split(' | ')))
+          csv_fields=[k for k in results[0] if k!='ocr_text']
+          with (outdir/f'SCAN_LEDGER_CHUNK_{CHUNK:02d}.csv').open('w',encoding='utf-8-sig',newline='') as f:
+              w=csv.DictWriter(f,fieldnames=csv_fields); w.writeheader(); w.writerows({k:r.get(k,'') for k in csv_fields} for r in results)
+          with (outdir/f'SCAN_OCR_CHUNK_{CHUNK:02d}.jsonl').open('w',encoding='utf-8') as f:
+              for r in results: f.write(json.dumps(r,ensure_ascii=False,sort_keys=True)+'\n')
+          mapping=[]
+          for r in results:
+              for source_id,portal_id,seq in zip(r['source_record_ids'].split(' | '),r['portal_record_ids'].split(' | '),r['source_sequences'].split(' | ')):
+                  mapping.append({'source_record_id':source_id,'portal_record_id':portal_id,'source_sequence':seq,'scan_id':r['scan_id'],'scan_url':r['scan_url'],'scan_sha256':r['scan_sha256'],'ocr_text_sha256':r['ocr_text_sha256'],'status':r['status']})
+          mapping.sort(key=lambda r:int(r['source_sequence']))
+          with (outdir/f'RECORD_SCAN_MAP_CHUNK_{CHUNK:02d}.csv').open('w',encoding='utf-8-sig',newline='') as f:
+              w=csv.DictWriter(f,fieldnames=list(mapping[0])); w.writeheader(); w.writerows(mapping)
+          errors=[r for r in results if r['status']!='COMPLETE']
+          report={'chunk':CHUNK,'chunk_count':CHUNK_COUNT,'unique_scans':len(results),'source_records':len(mapping),'complete_scans':len(results)-len(errors),'error_scans':len(errors),'scan_bytes_total':sum(int(r['scan_bytes'] or 0) for r in results),'ocr_characters_total':sum(int(r['ocr_characters'] or 0) for r in results),'errors':[{'scan_id':r['scan_id'],'error':r['ocr_error']} for r in errors]}
+          (outdir/f'CHUNK_REPORT_{CHUNK:02d}.json').write_text(json.dumps(report,indent=2),encoding='utf-8')
+          print(json.dumps(report,indent=2),flush=True)
+          if errors: raise SystemExit(f'{len(errors)} scans failed in chunk {CHUNK}')
+          PY
+          python /tmp/process_lac_scans.py
+          sha256sum output/* > output/SHA256SUMS.txt
+      - name: Upload scan/OCR partition
+        uses: actions/upload-artifact@v4
+        with:
+          name: lac-ufo-scan-ocr-${{ matrix.chunk }}
+          path: output/
+          if-no-files-found: error
+          compression-level: 9
+          retention-days: 3
