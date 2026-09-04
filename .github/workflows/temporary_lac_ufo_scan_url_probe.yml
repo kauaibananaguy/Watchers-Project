@@ -1,0 +1,57 @@
+name: Temporary LAC UFO scan URL probe
+
+on:
+  push:
+    paths:
+      - '.github/workflows/temporary_lac_ufo_scan_url_probe.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Fetch representative item and image pages
+        run: |
+          set -euo pipefail
+          mkdir -p export
+          urls=(
+            'https://www.collectionscanada.gc.ca/databases/ufo/001057-119.01-e.php?isn_id_nbr=13019&page_id_nbr=4382&record_id=13019-4382-12906&interval=50'
+            'https://www.collectionscanada.gc.ca/databases/ufo/001057-119.02-e.php?isn_id_nbr=13019&page_id_nbr=4382&record_id=13019-4382-12906&interval=50'
+            'https://www.collectionscanada.gc.ca/databases/ufo/001057-119.02-e.php?isn_id_nbr=13019&page_id_nbr=4378&record_id=13019-4378-0&interval=50'
+          )
+          i=0
+          for url in "${urls[@]}"; do
+            i=$((i+1))
+            curl --fail --location --retry 3 --user-agent 'Mozilla/5.0' "$url" -o "export/page_${i}.html"
+          done
+          python - <<'PY'
+          from pathlib import Path
+          from bs4 import BeautifulSoup
+          import json, re, urllib.parse, subprocess, os
+          out=[]
+          for p in sorted(Path('export').glob('page_*.html')):
+              raw=p.read_bytes(); text=raw.decode('latin-1',errors='replace')
+              soup=BeautifulSoup(text,'html.parser')
+              imgs=[]
+              for tag in soup.find_all('img'):
+                  imgs.append({'src':tag.get('src'),'alt':tag.get('alt'),'width':tag.get('width'),'height':tag.get('height')})
+              links=[]
+              for tag in soup.find_all('a',href=True):
+                  href=tag.get('href'); label=' '.join(tag.get_text(' ',strip=True).split())
+                  if any(x in (href or '').lower() for x in ['jpg','jpeg','gif','tif','tiff','pdf','001057','image','pic']):
+                      links.append({'href':href,'label':label})
+              scripts='\n'.join(tag.get_text('\n') for tag in soup.find_all('script'))
+              urlish=sorted(set(re.findall(r'https?://[^\s\"\'<>]+|[^\s\"\'<>]+\.(?:jpg|jpeg|gif|png|tif|tiff|pdf)(?:\?[^\s\"\'<>]*)?',text,re.I)))
+              out.append({'file':p.name,'bytes':len(raw),'title':soup.title.get_text(' ',strip=True) if soup.title else None,'images':imgs,'links':links,'urlish':urlish[:100],'text_excerpt':' '.join(soup.get_text(' ',strip=True).split())[:3000]})
+          Path('export/probe.json').write_text(json.dumps(out,indent=2,ensure_ascii=False),encoding='utf-8')
+          print(json.dumps(out,indent=2,ensure_ascii=False))
+          PY
+      - name: Upload probe
+        uses: actions/upload-artifact@v4
+        with:
+          name: lac-ufo-scan-url-probe
+          path: export/
+          retention-days: 1
