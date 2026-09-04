@@ -1,0 +1,65 @@
+name: Temporary LAC UFO scan sample
+
+on:
+  push:
+    paths:
+      - '.github/workflows/temporary_lac_ufo_scan_sample.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  sample:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Fetch and OCR representative LAC scans
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq tesseract-ocr imagemagick
+          python -m pip install --quiet beautifulsoup4 pillow
+          mkdir -p export/images export/ocr
+          cat > /tmp/sample.py <<'PY'
+          from pathlib import Path
+          from bs4 import BeautifulSoup
+          from PIL import Image
+          import requests, urllib.parse, json, hashlib, subprocess, os
+          rows=[
+            ('13019','4378','13019-4378-0'),
+            ('13019','4382','13019-4382-12906'),
+            ('4668','73','4668-73-7085'),
+            ('4669','204','4669-204-7193'),
+            ('37024','9471','37024-9471-13503'),
+          ]
+          sess=requests.Session(); sess.headers.update({'User-Agent':'Mozilla/5.0'})
+          out=[]
+          for isn,page,rid in rows:
+            image_page=f'https://www.collectionscanada.gc.ca/databases/ufo/001057-119.02-e.php?isn_id_nbr={isn}&page_id_nbr={page}&record_id={rid}&interval=50'
+            r=sess.get(image_page,timeout=60); r.raise_for_status()
+            soup=BeautifulSoup(r.content.decode('latin-1',errors='replace'),'html.parser')
+            src=None
+            for img in soup.find_all('img',src=True):
+              u=urllib.parse.urljoin(image_page,img['src'])
+              if 'data2.collectionscanada.gc.ca' in u and u.lower().endswith(('.jpg','.jpeg','.tif','.tiff','.png')):
+                src=u.replace('http://','https://'); break
+            if not src: raise RuntimeError(f'No scan URL for {rid}')
+            ir=sess.get(src,timeout=120); ir.raise_for_status()
+            ext=Path(urllib.parse.urlparse(src).path).suffix or '.jpg'
+            p=Path('export/images')/(rid+ext)
+            p.write_bytes(ir.content)
+            im=Image.open(p)
+            subprocess.run(['tesseract',str(p),f'export/ocr/{rid}','-l','eng','--psm','6'],check=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+            txt=Path(f'export/ocr/{rid}.txt').read_text(encoding='utf-8',errors='replace')
+            out.append({'record_id':rid,'image_page_url':image_page,'scan_url':src,'size_bytes':len(ir.content),'sha256':hashlib.sha256(ir.content).hexdigest(),'width':im.width,'height':im.height,'mode':im.mode,'ocr_characters':len(txt),'ocr_excerpt':' '.join(txt.split())[:1000]})
+          Path('export/sample_report.json').write_text(json.dumps(out,indent=2,ensure_ascii=False),encoding='utf-8')
+          print(json.dumps(out,indent=2,ensure_ascii=False))
+          PY
+          python /tmp/sample.py
+          du -ah export | sort -h | tail
+      - name: Upload sample
+        uses: actions/upload-artifact@v4
+        with:
+          name: lac-ufo-scan-sample
+          path: export/
+          retention-days: 1
