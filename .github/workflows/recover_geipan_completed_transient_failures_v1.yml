@@ -1,0 +1,144 @@
+name: Recover completed GEIPAN transient failures v1
+
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/recover_geipan_completed_transient_failures_v1.yml]
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: Existing acquisition run; only completed failed URLs are retried
+        default: '33914098603'
+        required: true
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: geipan-completed-transient-recovery
+  cancel-in-progress: false
+
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      SOURCE_RUN_ID: ${{ inputs.source_run_id || '33914098603' }}
+      PYTHONUNBUFFERED: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Snapshot completed results and acquisition code
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_RUN_ID" =~ ^[0-9]+$ ]]
+          mkdir -p recovery/source_code recovery/source_metadata
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" > recovery/SOURCE_RUN.json
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID/artifacts?per_page=100" > recovery/ARTIFACT_PAGES.json
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID/jobs?per_page=100" > recovery/JOB_PAGES.json
+          gh run download "$SOURCE_RUN_ID" -R "$GITHUB_REPOSITORY" -p 'geipan-asset-v2-metadata-*' -D recovery/source_metadata
+          cp ufo_atlas/ingestion/geipan/{crawl_assets_v1.py,crawl_case_packets.py,acquire_assets_repair_v2.py,repair_assets_v012.py} recovery/source_code/
+      - name: Select a bounded set of recorded transient failures
+        run: |
+          python - <<'PY'
+          import collections,hashlib,json,os,re,sqlite3,urllib.parse
+          from pathlib import Path
+          root=Path('recovery')
+          source=json.loads((root/'SOURCE_RUN.json').read_text())
+          if source['path']!='.github/workflows/acquire_geipan_linked_assets_v2.yml':
+              raise SystemExit('Wrong source workflow; refusing downloads')
+          targets=[];seen=set();counts=collections.Counter();batch_count=0
+          for db in sorted((root/'source_metadata').rglob('GEIPAN_ASSET_BATCH_*.sqlite')):
+              batch_count+=1
+              for line in (db.parent/'SHA256SUMS.txt').read_text().splitlines():
+                  digest,relative=line.split(None,1)
+                  relative=relative.strip().lstrip('*')
+                  if relative.startswith('blobs/'): continue
+                  member=(db.parent/relative).resolve()
+                  if not member.is_relative_to(db.parent.resolve()): raise SystemExit('Unsafe checksum path')
+                  if not member.is_file() or hashlib.sha256(member.read_bytes()).hexdigest()!=digest:
+                      raise SystemExit('Source metadata checksum failure')
+              con=sqlite3.connect('file:'+str(db.resolve())+'?mode=ro',uri=True);con.row_factory=sqlite3.Row
+              if con.execute('pragma integrity_check').fetchone()[0]!='ok' or con.execute('pragma foreign_key_check').fetchall():
+                  raise SystemExit('Invalid source metadata database')
+              for row in con.execute('select * from asset'):
+                  data=dict(row);url=data['asset_url']
+                  if url in seen: raise SystemExit('Duplicate source asset across batches')
+                  seen.add(url);counts[data['retrieval_status']]+=1
+                  host=urllib.parse.urlparse(url).hostname
+                  error=(data.get('error') or '').lower()
+                  transient=any(t in error for t in ['http error 429','http error 500','http error 502','http error 503','http error 504','timed out','timeout','temporary failure in name resolution','connection reset'])
+                  if data['retrieval_status']=='DOWNLOAD_ERROR' and transient and host in {'www.geipan.fr','geipan.fr','www.cnes-geipan.fr','cnes-geipan.fr'} and url.lower().endswith('.pdf'):
+                      data['prior_metadata_path']=str(db.relative_to(root));targets.append(data)
+              con.close()
+          targets=sorted(targets,key=lambda d:d['asset_url'])[:8]
+          (root/'PRIOR_RESULTS.json').write_text(json.dumps(targets,indent=2,ensure_ascii=False)+'\n')
+          (root/'early_retry_assets.json').write_text(json.dumps(targets,indent=2,ensure_ascii=False)+'\n')
+          (root/'BASELINE_SUMMARY.json').write_text(json.dumps({'metadata_batches':batch_count,'asset_rows':len(seen),'status_counts':dict(counts),'selected_retries':len(targets)},indent=2)+'\n')
+          print(json.dumps({'baseline_counts':dict(counts),'selected_retries':len(targets)},indent=2))
+          PY
+      - name: Install text-layer reader
+        run: python -m pip install --disable-pip-version-check 'pypdf>=6,<7'
+      - name: Retry only selected URLs without changing the original run
+        run: |
+          python - <<'PY'
+          import argparse,json,sys
+          from pathlib import Path
+          sys.path.insert(0,'ufo_atlas/ingestion/geipan')
+          import crawl_assets_v1 as base
+          original=base.shared.request_bytes
+          def bounded(url,retries=2,timeout=60):
+              data,final_url,headers=original(url,retries=min(retries,2),timeout=min(timeout,60))
+              if not data.lstrip().startswith(b'%PDF-'):
+                  raise RuntimeError('INVALID_PDF_RESPONSE: expected a PDF, not an HTML or other response')
+              headers=dict(headers)
+              headers['X-Watchers-Acquisition-Method']='EXACT_URL_TRANSIENT_RETRY'
+              return data,final_url,headers
+          base.shared.request_bytes=bounded
+          targets=json.loads(Path('recovery/early_retry_assets.json').read_text())
+          base.acquire(argparse.Namespace(assets='recovery/early_retry_assets.json',batch_index=9000,start=0,end=len(targets),output_dir='recovery/recovered_batch',delay_seconds=20.0,retries=2,max_asset_bytes=100000000,max_batch_bytes=400000000))
+          PY
+      - name: Write independently verifiable recovery receipt
+        if: always()
+        run: |
+          python - <<'PY'
+          import collections,datetime,hashlib,json,os,sqlite3
+          from pathlib import Path
+          root=Path('recovery');db=root/'recovered_batch/GEIPAN_ASSET_BATCH_9000.sqlite'
+          rows=[]
+          if db.exists():
+              con=sqlite3.connect('file:'+str(db.resolve())+'?mode=ro',uri=True);con.row_factory=sqlite3.Row
+              if con.execute('pragma integrity_check').fetchone()[0]!='ok' or con.execute('pragma foreign_key_check').fetchall(): raise SystemExit('Invalid recovered database')
+              for row in con.execute('select * from asset'):
+                  data=dict(row)
+                  if data['retrieval_status']=='DOWNLOADED':
+                      p=db.parent/data['local_blob_path']
+                      if p.stat().st_size!=data['byte_count'] or hashlib.sha256(p.read_bytes()).hexdigest()!=data['sha256']: raise SystemExit('Recovered file mismatch')
+                  rows.append(data)
+              for text,digest in con.execute('select text,text_sha256 from asset_text_unit'):
+                  if hashlib.sha256((text or '').encode('utf-8')).hexdigest()!=digest: raise SystemExit('Extracted text checksum mismatch')
+              con.close()
+          prior=json.loads((root/'PRIOR_RESULTS.json').read_text()) if (root/'PRIOR_RESULTS.json').exists() else []
+          accounted={r['asset_url'] for r in rows}=={r['asset_url'] for r in prior}
+          report={'verified_at_utc':datetime.datetime.now(datetime.timezone.utc).isoformat(),'original_asset_download_run_id':int(os.environ['SOURCE_RUN_ID']),'recovery_run_id':int(os.environ['GITHUB_RUN_ID']),'recovery_commit':os.environ['GITHUB_SHA'],'selected_urls':len(prior),'result_rows':len(rows),'status_counts':dict(collections.Counter(r['retrieval_status'] for r in rows)),'all_selected_urls_accounted':accounted,'source_run_restarted':False,'canonical_atlas_modified':False,'integration_state':'SUPPLEMENTAL_RECOVERY_RECEIPT_NOT_YET_MERGED_INTO_FINAL_PIPELINE','results':rows}
+          (root/'RECOVERY_REPORT.json').write_text(json.dumps(report,indent=2,ensure_ascii=False)+'\n')
+          sums=[]
+          for p in sorted(root.rglob('*')):
+              if p.is_file() and p!=root/'RECOVERY_SHA256SUMS.txt':
+                  with p.open('rb') as f: sums.append(hashlib.file_digest(f,'sha256').hexdigest()+'  '+p.relative_to(root).as_posix())
+          (root/'RECOVERY_SHA256SUMS.txt').write_text('\n'.join(sums)+'\n')
+          print(json.dumps({k:v for k,v in report.items() if k!='results'},indent=2))
+          with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as f: f.write('```json\n'+json.dumps({k:v for k,v in report.items() if k!='results'},indent=2)+'\n```\n')
+          if not accounted: raise SystemExit('Incomplete recovery attempt; diagnostics retained')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: GEIPAN_COMPLETED_FAILURE_RECOVERY_v0.1.0
+          path: recovery/
+          if-no-files-found: error
+          retention-days: 90
