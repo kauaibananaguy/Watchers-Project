@@ -1,0 +1,118 @@
+name: Temporary LAC UFO scan range reconciliation
+
+on:
+  push:
+    paths:
+      - '.github/workflows/temporary_lac_ufo_scan_range_reconciliation.yml'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Download LAC metadata union
+        uses: actions/download-artifact@v4
+        with:
+          name: lac-ufo-complete-metadata-union
+          path: metadata
+          github-token: ${{ github.token }}
+          repository: kauaibananaguy/Watchers-Project
+          run-id: 33924142848
+      - name: Resolve image-navigation ranges for every source file
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet requests beautifulsoup4
+          mkdir -p output
+          cat > /tmp/reconcile.py <<'PY'
+          from __future__ import annotations
+          import csv, hashlib, json, re, time, urllib.parse
+          from collections import defaultdict
+          from pathlib import Path
+          import requests
+          from bs4 import BeautifulSoup
+
+          source_csv=next(Path('metadata').rglob('LAC_UFO_SOURCE_INDEX.csv'))
+          with source_csv.open('r',encoding='utf-8-sig',newline='') as f:
+              rows=list(csv.DictReader(f))
+          by_isn=defaultdict(list)
+          for row in rows:
+              if row.get('isn_id_nbr') and row.get('page_id_nbr','').isdigit():
+                  by_isn[row['isn_id_nbr']].append(row)
+          session=requests.Session();session.headers.update({'User-Agent':'Mozilla/5.0 (compatible; WatchersProject-UFOAtlas/1.0; archival research)'})
+          def get(url):
+              last=None
+              for n in range(6):
+                  try:
+                      r=session.get(url,timeout=60,allow_redirects=True);r.raise_for_status();return r
+                  except Exception as e:
+                      last=e;time.sleep(min(8,n+1))
+              raise RuntimeError(f'{url}: {last}')
+          out=[]
+          for number,(isn,members) in enumerate(sorted(by_isn.items(),key=lambda kv:int(kv[0])),1):
+              members=sorted(members,key=lambda r:int(r['page_id_nbr']))
+              representative=members[len(members)//2]
+              r=get(representative['image_view_url'])
+              text=r.content.decode('latin-1',errors='replace')
+              soup=BeautifulSoup(text,'html.parser')
+              nav={}
+              for a in soup.find_all('a',href=True):
+                  label=' '.join(a.get_text(' ',strip=True).split())
+                  if label in {'<<','<','>','>>'}:
+                      q=urllib.parse.parse_qs(urllib.parse.urlparse(urllib.parse.urljoin(r.url,a['href'])).query)
+                      p=(q.get('page_id_nbr') or [''])[0]
+                      if p.isdigit(): nav[label]=int(p)
+              direct=''
+              for img in soup.find_all('img',src=True):
+                  cand=urllib.parse.urljoin(r.url,img['src'])
+                  if 'data2.collectionscanada.gc.ca' in cand:
+                      direct=cand.replace('http://','https://',1);break
+              indexed_pages=sorted({int(x['page_id_nbr']) for x in members})
+              minimum=nav.get('<<',indexed_pages[0]);maximum=nav.get('>>',indexed_pages[-1])
+              span=maximum-minimum+1
+              missing=sorted(set(range(minimum,maximum+1))-set(indexed_pages))
+              out.append({
+                  'isn_id_nbr':isn,
+                  'record_group':representative['record_group'],
+                  'document_title':representative['document_title'],
+                  'representative_portal_record_id':representative['portal_record_id'],
+                  'representative_page_id':representative['page_id_nbr'],
+                  'first_page_id':minimum,
+                  'last_page_id':maximum,
+                  'physical_page_span':span,
+                  'indexed_unique_pages':len(indexed_pages),
+                  'unindexed_pages_within_span':len(missing),
+                  'first_unindexed_page_ids':' | '.join(map(str,missing[:30])),
+                  'direct_scan_url_sample':direct,
+                  'image_page_sha256':hashlib.sha256(r.content).hexdigest(),
+                  'status':'RANGE_RESOLVED' if minimum<=indexed_pages[0]<=indexed_pages[-1]<=maximum else 'RANGE_ANOMALY',
+              })
+              print(f'{number}/{len(by_isn)} ISN {isn}: {minimum}-{maximum}, indexed {len(indexed_pages)}, missing {len(missing)}',flush=True)
+          fields=list(out[0].keys())
+          with open('output/LAC_SCAN_RANGE_RECONCILIATION.csv','w',encoding='utf-8-sig',newline='') as f:
+              w=csv.DictWriter(f,fieldnames=fields);w.writeheader();w.writerows(out)
+          report={
+              'source_index_records':len(rows),
+              'source_files_with_scan_ranges':len(out),
+              'physical_page_span_total':sum(r['physical_page_span'] for r in out),
+              'indexed_unique_scan_pages_total':sum(r['indexed_unique_pages'] for r in out),
+              'unindexed_pages_within_ranges_total':sum(r['unindexed_pages_within_span'] for r in out),
+              'range_anomalies':sum(r['status']!='RANGE_RESOLVED' for r in out),
+              'records_without_numeric_scan_identifier':sum(not r.get('isn_id_nbr') or not r.get('page_id_nbr','').isdigit() for r in rows),
+              'status':'COMPLETE',
+          }
+          Path('output/LAC_SCAN_RANGE_RECONCILIATION_REPORT.json').write_text(json.dumps(report,indent=2),encoding='utf-8')
+          print(json.dumps(report,indent=2),flush=True)
+          PY
+          python /tmp/reconcile.py
+          sha256sum output/* > output/SHA256SUMS.txt
+      - name: Upload reconciliation
+        uses: actions/upload-artifact@v4
+        with:
+          name: lac-ufo-scan-range-reconciliation
+          path: output/
+          if-no-files-found: error
+          retention-days: 3
