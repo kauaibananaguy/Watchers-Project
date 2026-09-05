@@ -1,0 +1,69 @@
+name: Temporary LAC UFO complete source snapshot
+
+on:
+  push:
+    paths:
+      - '.github/workflows/temporary_lac_ufo_complete_source_snapshot.yml'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  snapshot:
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        chunk: [0, 1, 2, 3, 4, 5, 6, 7]
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Check out source snapshot worker
+        uses: actions/checkout@v4
+      - name: Download full physical-page navigation inventory
+        uses: actions/download-artifact@v4
+        with:
+          pattern: lac-ufo-navigation-inventory-*
+          path: navigation
+          merge-multiple: true
+          github-token: ${{ github.token }}
+          repository: kauaibananaguy/Watchers-Project
+          run-id: 33938254120
+      - name: Download indexed-page OCR corpus
+        uses: actions/download-artifact@v4
+        with:
+          pattern: lac-ufo-scan-ocr-*
+          path: indexed_ocr
+          merge-multiple: true
+          github-token: ${{ github.token }}
+          repository: kauaibananaguy/Watchers-Project
+          run-id: 33928630759
+      - name: Install image and OCR dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq tesseract-ocr tesseract-ocr-eng tesseract-ocr-fra
+          python -m pip install --quiet requests pillow
+      - name: Preserve scans and complete OCR
+        env:
+          CHUNK: ${{ matrix.chunk }}
+          CHUNK_COUNT: 8
+          INVENTORY_ROOT: navigation
+          INDEXED_OCR_ROOT: indexed_ocr
+          OUTPUT: output
+          OMP_THREAD_LIMIT: 1
+          OMP_NUM_THREADS: 1
+        run: |
+          set -euo pipefail
+          python scripts/lac_full_scan_snapshot_worker.py
+          sha256sum output/SOURCE_SCAN_LEDGER_CHUNK_*.csv output/SCAN_CONTENT_CHUNK_*.jsonl output/SOURCE_SCAN_SNAPSHOT_REPORT_CHUNK_*.json > output/SHA256SUMS.txt
+          find output/scans -type f -print0 | sort -z | xargs -0 sha256sum > output/SOURCE_SCAN_FILE_SHA256SUMS.txt
+      - name: Upload complete source snapshot partition
+        uses: actions/upload-artifact@v4
+        with:
+          name: lac-ufo-complete-source-snapshot-${{ matrix.chunk }}
+          path: output/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
