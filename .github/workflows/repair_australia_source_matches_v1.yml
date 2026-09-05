@@ -1,0 +1,61 @@
+name: Repair Australia UFO source-file matches v1
+on:
+  push:
+    branches: [main]
+    paths:
+      - ufo_atlas/ingestion/australia/repair_source_matches_v1.py
+      - .github/workflows/repair_australia_source_matches_v1.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: australia-ufo-source-match-repair-v1
+  cancel-in-progress: false
+jobs:
+  repair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      SOURCE_ARTIFACT_ID: '9971725214'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - name: Download exact source snapshot
+        run: |
+          set -euo pipefail
+          mkdir -p source-outer source
+          gh api repos/$GITHUB_REPOSITORY/actions/artifacts/$SOURCE_ARTIFACT_ID/zip > source-artifact.zip
+          unzip -q source-artifact.zip -d source-outer
+          unzip -q source-outer/AUSTRALIA_GOVERNMENT_UFO_SOURCE_SNAPSHOT_v0.3.0.zip -d source
+          unzip -t source-outer/AUSTRALIA_GOVERNMENT_UFO_SOURCE_SNAPSHOT_v0.3.0.zip >/dev/null
+      - name: Repair exact file identities
+        run: python ufo_atlas/ingestion/australia/repair_source_matches_v1.py --input-dir source --output-dir repaired
+      - name: Verify and package
+        run: |
+          python - <<'PY'
+          import json,sqlite3
+          s=json.load(open('repaired/SUMMARY.json'))
+          assert s['status']=='PASS' and s['source_files']==155 and s['text_access_copies']==21 and s['exact_file_identity_matches']==16
+          con=sqlite3.connect('repaired/AUSTRALIA_GOVERNMENT_UFO_SOURCE_SNAPSHOT_v0.3.1.sqlite')
+          assert con.execute('pragma integrity_check').fetchone()[0]=='ok'
+          assert not con.execute('pragma foreign_key_check').fetchall()
+          assert con.execute("select count(distinct access_copy_id) from file_access_match where relationship='SAME_ARCHIVAL_FILE'").fetchone()[0]==16
+          con.close()
+          PY
+          (cd repaired && zip -q -r ../AUSTRALIA_GOVERNMENT_UFO_SOURCE_SNAPSHOT_v0.3.1.zip .)
+          sha256sum AUSTRALIA_GOVERNMENT_UFO_SOURCE_SNAPSHOT_v0.3.1.zip > AUSTRALIA_GOVERNMENT_UFO_SOURCE_SNAPSHOT_v0.3.1.zip.sha256
+          unzip -t AUSTRALIA_GOVERNMENT_UFO_SOURCE_SNAPSHOT_v0.3.1.zip >/dev/null
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AUSTRALIA_GOVERNMENT_UFO_SOURCE_SNAPSHOT_v0.3.1
+          path: |
+            AUSTRALIA_GOVERNMENT_UFO_SOURCE_SNAPSHOT_v0.3.1.zip
+            AUSTRALIA_GOVERNMENT_UFO_SOURCE_SNAPSHOT_v0.3.1.zip.sha256
+            repaired/SUMMARY.json
+            repaired/FILE_ACCESS_MATCHES.csv
+          retention-days: 90
+          compression-level: 0
+          if-no-files-found: error
