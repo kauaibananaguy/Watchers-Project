@@ -1,0 +1,61 @@
+name: Aggregate Australia NAA official probes v2
+on:
+  push:
+    branches: [main]
+    paths:
+      - ufo_atlas/ingestion/australia/aggregate_naa_probes_v2.py
+      - .github/workflows/aggregate_australia_naa_probes_v2.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: australia-naa-official-probe-aggregate-v2
+  cancel-in-progress: false
+jobs:
+  aggregate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      SOURCE_RUN_ID: '33973328976'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - name: Download all completed item-probe artifacts from the original run
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          gh run download "$SOURCE_RUN_ID" -R "$GITHUB_REPOSITORY" -p 'australia-naa-ufo-item-*' -D results
+          count="$(find results -name RESULT.json -type f | wc -l)"
+          echo "Completed probe result files: $count"
+          test "$count" -ge 100
+      - name: Aggregate without duplicate-barcode loss
+        run: python ufo_atlas/ingestion/australia/aggregate_naa_probes_v2.py --input-dir results --output-dir snapshot
+      - name: Verify and package
+        run: |
+          python - <<'PY'
+          import json,sqlite3
+          s=json.load(open('snapshot/SUMMARY.json'))
+          assert s['status']=='PASS' and s['completed_probe_results']>=100
+          con=sqlite3.connect('snapshot/AUSTRALIA_NAA_OFFICIAL_PROBE_SNAPSHOT_v0.2.0.sqlite')
+          assert con.execute('pragma integrity_check').fetchone()[0]=='ok'
+          assert not con.execute('pragma foreign_key_check').fetchall()
+          assert con.execute('select count(*) from official_probe_result').fetchone()[0]==s['completed_probe_results']
+          con.close()
+          PY
+          (cd snapshot && zip -q -r ../AUSTRALIA_NAA_OFFICIAL_PROBE_SNAPSHOT_v0.2.0.zip .)
+          sha256sum AUSTRALIA_NAA_OFFICIAL_PROBE_SNAPSHOT_v0.2.0.zip > AUSTRALIA_NAA_OFFICIAL_PROBE_SNAPSHOT_v0.2.0.zip.sha256
+          unzip -t AUSTRALIA_NAA_OFFICIAL_PROBE_SNAPSHOT_v0.2.0.zip >/dev/null
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AUSTRALIA_NAA_OFFICIAL_PROBE_SNAPSHOT_v0.2.0
+          path: |
+            AUSTRALIA_NAA_OFFICIAL_PROBE_SNAPSHOT_v0.2.0.zip
+            AUSTRALIA_NAA_OFFICIAL_PROBE_SNAPSHOT_v0.2.0.zip.sha256
+            snapshot/SUMMARY.json
+            snapshot/OFFICIAL_PROBE_INDEX.csv
+          retention-days: 90
+          compression-level: 0
+          if-no-files-found: error
