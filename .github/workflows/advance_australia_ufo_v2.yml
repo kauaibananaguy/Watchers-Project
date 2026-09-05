@@ -1,0 +1,139 @@
+name: Advance Australia government UFO source and case extraction v2
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ufo_atlas/ingestion/australia/merge_official_probes_v1.py
+      - ufo_atlas/ingestion/australia/extract_case_candidates_v2.py
+      - .github/workflows/advance_australia_ufo_v2.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: australia-ufo-advance-v2
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      SOURCE31_ARTIFACT_ID: '9971797602'
+      OFFICIAL_PROBE_ARTIFACT_ID: '9971868385'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Download exact verified predecessor artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p source31-outer source31 probe-outer probe
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$SOURCE31_ARTIFACT_ID/zip" > source31-artifact.zip
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$OFFICIAL_PROBE_ARTIFACT_ID/zip" > probe-artifact.zip
+          unzip -q source31-artifact.zip -d source31-outer
+          unzip -q probe-artifact.zip -d probe-outer
+          unzip -q source31-outer/AUSTRALIA_GOVERNMENT_UFO_SOURCE_SNAPSHOT_v0.3.1.zip -d source31
+          unzip -q probe-outer/AUSTRALIA_NAA_OFFICIAL_PROBE_SNAPSHOT_v0.2.0.zip -d probe
+          unzip -t source31-outer/AUSTRALIA_GOVERNMENT_UFO_SOURCE_SNAPSHOT_v0.3.1.zip >/dev/null
+          unzip -t probe-outer/AUSTRALIA_NAA_OFFICIAL_PROBE_SNAPSHOT_v0.2.0.zip >/dev/null
+
+      - name: Merge official NAA evidence into source snapshot
+        run: python ufo_atlas/ingestion/australia/merge_official_probes_v1.py --source-dir source31 --probe-dir probe --output-dir source40
+
+      - name: Verify source snapshot v0.4.0
+        run: |
+          python - <<'PY'
+          import json,sqlite3
+          s=json.load(open('source40/SUMMARY.json'))
+          assert s['status']=='PASS'
+          assert s['source_files']==155
+          assert s['text_access_copies']==21
+          assert s['text_access_pages']==2901
+          assert s['official_probe_results_merged']==109
+          assert s['official_probe_source_file_links']==109
+          assert s['official_item_pages_http_200']==96
+          assert s['official_first_page_binary_reachable']==83
+          assert s['official_identity_mismatches']==0
+          con=sqlite3.connect('source40/AUSTRALIA_GOVERNMENT_UFO_SOURCE_SNAPSHOT_v0.4.0.sqlite')
+          assert con.execute('pragma integrity_check').fetchone()[0]=='ok'
+          assert not con.execute('pragma foreign_key_check').fetchall()
+          assert con.execute('select count(*) from source_file_official_probe').fetchone()[0]==109
+          con.close()
+          PY
+          (cd source40 && zip -q -r ../AUSTRALIA_GOVERNMENT_UFO_SOURCE_SNAPSHOT_v0.4.0.zip .)
+          sha256sum AUSTRALIA_GOVERNMENT_UFO_SOURCE_SNAPSHOT_v0.4.0.zip > AUSTRALIA_GOVERNMENT_UFO_SOURCE_SNAPSHOT_v0.4.0.zip.sha256
+          unzip -t AUSTRALIA_GOVERNMENT_UFO_SOURCE_SNAPSHOT_v0.4.0.zip >/dev/null
+
+      - name: Expand case candidates and adjudication queue
+        run: python ufo_atlas/ingestion/australia/extract_case_candidates_v2.py --input-dir source40 --output-dir module20
+
+      - name: Verify import module v0.2.0
+        run: |
+          python - <<'PY'
+          import json,sqlite3
+          s=json.load(open('module20/SUMMARY.json'))
+          assert s['status']=='PASS'
+          assert s['report_form_case_candidates']>=139
+          assert s['total_case_candidates']>=141
+          assert s['candidate_fields']>=500
+          assert s['chronology_facts']>=120
+          assert s['official_provenance_links']>=139
+          assert s['event_fragments']>=400
+          assert s['event_clusters']>=240
+          assert s['unresolved_event_clusters']<=140
+          con=sqlite3.connect('module20/AUSTRALIA_UFO_IMPORT_MODULE_v0.2.0.sqlite')
+          assert con.execute('pragma integrity_check').fetchone()[0]=='ok'
+          assert not con.execute('pragma foreign_key_check').fetchall()
+          assert con.execute('select count(*) from case_candidate').fetchone()[0]>=141
+          assert con.execute('select count(*) from candidate_official_provenance').fetchone()[0]>=139
+          con.close()
+          PY
+          (cd module20 && zip -q -r ../AUSTRALIA_UFO_IMPORT_MODULE_v0.2.0.zip .)
+          sha256sum AUSTRALIA_UFO_IMPORT_MODULE_v0.2.0.zip > AUSTRALIA_UFO_IMPORT_MODULE_v0.2.0.zip.sha256
+          unzip -t AUSTRALIA_UFO_IMPORT_MODULE_v0.2.0.zip >/dev/null
+
+      - name: Write checkpoint manifest
+        run: |
+          python - <<'PY'
+          import json,hashlib
+          a=json.load(open('source40/SUMMARY.json'));b=json.load(open('module20/SUMMARY.json'))
+          manifest={'status':'PASS_WORKING_CHECKPOINT','canonical_master_atlas_modified':False,'source_snapshot_version':'v0.4.0','import_module_version':'v0.2.0','source':a,'case_module':b,'note':'Working source/import checkpoint. Final chronological narratives and CE adjudication remain downstream.'}
+          open('AUSTRALIA_UFO_WORKING_CHECKPOINT_v2.json','w').write(json.dumps(manifest,indent=2)+'\n')
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AUSTRALIA_GOVERNMENT_UFO_SOURCE_SNAPSHOT_v0.4.0
+          path: |
+            AUSTRALIA_GOVERNMENT_UFO_SOURCE_SNAPSHOT_v0.4.0.zip
+            AUSTRALIA_GOVERNMENT_UFO_SOURCE_SNAPSHOT_v0.4.0.zip.sha256
+            source40/SUMMARY.json
+            source40/OFFICIAL_SOURCE_LINKS.csv
+            source40/IDENTITY_MISMATCHES.json
+          retention-days: 90
+          compression-level: 0
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AUSTRALIA_UFO_IMPORT_MODULE_v0.2.0
+          path: |
+            AUSTRALIA_UFO_IMPORT_MODULE_v0.2.0.zip
+            AUSTRALIA_UFO_IMPORT_MODULE_v0.2.0.zip.sha256
+            module20/SUMMARY.json
+            module20/CASE_CANDIDATES.csv
+            module20/EVENT_CLUSTERS.csv
+            module20/ENTITY_CANDIDATES.csv
+            module20/CHRONOLOGY_FACTS.csv
+            module20/OFFICIAL_PROVENANCE.csv
+            AUSTRALIA_UFO_WORKING_CHECKPOINT_v2.json
+          retention-days: 90
+          compression-level: 0
+          if-no-files-found: error
