@@ -1,0 +1,194 @@
+name: GEIPAN download checkpoint guard v1
+
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/geipan_download_checkpoint_guard_v1.yml]
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: Existing linked-assets v2 run to audit or recover; never starts new source downloads
+        required: true
+        default: '33914098603'
+  workflow_run:
+    workflows: ['Acquire GEIPAN linked case assets v2']
+    types: [completed]
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: geipan-checkpoint-guard-${{ inputs.source_run_id || github.event.workflow_run.id || '33914098603' }}
+  cancel-in-progress: false
+
+jobs:
+  checkpoint:
+    if: ${{ github.event_name != 'workflow_run' || (github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.head_branch == 'main') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      SOURCE_RUN_ID: ${{ inputs.source_run_id || github.event.workflow_run.id || '33914098603' }}
+      PYTHONUNBUFFERED: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Read every jobs and artifacts page without concatenated JSON
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_RUN_ID" =~ ^[0-9]+$ ]]
+          mkdir -p checkpoint/plan checkpoint/metadata-shards
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" > checkpoint/SOURCE_RUN.json
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID/jobs?per_page=100" > checkpoint/JOB_PAGES.json
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID/artifacts?per_page=100" > checkpoint/ARTIFACT_PAGES.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          root=Path('checkpoint')
+          run=json.loads((root/'SOURCE_RUN.json').read_text())
+          if run['path']!='.github/workflows/acquire_geipan_linked_assets_v2.yml':
+              raise SystemExit('Refusing a source run from a different workflow')
+          pages=json.loads((root/'ARTIFACT_PAGES.json').read_text())
+          artifacts=[a for page in pages for a in page.get('artifacts',[])]
+          if len({a['id'] for a in artifacts})!=len(artifacts):
+              raise SystemExit('Duplicate artifact IDs across API pages')
+          (root/'SOURCE_ARTIFACTS.json').write_text(json.dumps(artifacts,indent=2)+'\n')
+          PY
+          gh run download "$SOURCE_RUN_ID" -R "$GITHUB_REPOSITORY" -n geipan-linked-asset-v2-plan -D checkpoint/plan
+          if python -c 'import json,sys; sys.exit(0 if any(a["name"].startswith("geipan-asset-v2-metadata-") for a in json.load(open("checkpoint/SOURCE_ARTIFACTS.json"))) else 1)'; then
+            gh run download "$SOURCE_RUN_ID" -R "$GITHUB_REPOSITORY" -p 'geipan-asset-v2-metadata-*' -D checkpoint/metadata-shards
+          fi
+      - name: Verify saved batch databases and account for remaining work
+        id: audit
+        run: |
+          python - <<'PY'
+          import collections,datetime,hashlib,json,os,re,sqlite3
+          from pathlib import Path
+          root=Path('checkpoint')
+          run=json.loads((root/'SOURCE_RUN.json').read_text())
+          jobs=[j for p in json.loads((root/'JOB_PAGES.json').read_text()) for j in p.get('jobs',[])]
+          artifacts=json.loads((root/'SOURCE_ARTIFACTS.json').read_text())
+          planned=json.loads((root/'plan/assets.json').read_text())
+          matrix=json.loads((root/'plan/matrix.json').read_text())['include']
+          expected={a['asset_url'] for a in planned}
+          if len(expected)!=len(planned):
+              raise SystemExit('Duplicate asset URLs in immutable plan')
+          statuses=collections.Counter(); urls=set(); batch_ids=set(); text_units=0; downloaded_bytes=0
+          for summary_path in sorted((root/'metadata-shards').rglob('BATCH_SUMMARY.json')):
+              summary=json.loads(summary_path.read_text()); idx=summary['batch_index']
+              if idx in batch_ids:
+                  raise SystemExit('Duplicate metadata batch index')
+              batch_ids.add(idx)
+              dbs=list(summary_path.parent.glob('*.sqlite'))
+              if len(dbs)!=1:
+                  raise SystemExit('Metadata batch must contain exactly one database')
+              checked_members=set()
+              for line in (summary_path.parent/'SHA256SUMS.txt').read_text().splitlines():
+                  digest,relative=line.split(None,1); target=summary_path.parent/relative.strip().lstrip('*')
+                  if not target.resolve().is_relative_to(summary_path.parent.resolve()):
+                      raise SystemExit('Unsafe checksum path')
+                  # Raw blobs are in separate preserved artifacts, not this metadata audit.
+                  if relative.strip().lstrip('*').startswith('blobs/'):
+                      continue
+                  if not target.is_file() or hashlib.sha256(target.read_bytes()).hexdigest()!=digest:
+                      raise SystemExit('Batch member checksum mismatch: '+str(target))
+                  checked_members.add(target.name)
+              if not {summary_path.name,dbs[0].name}.issubset(checked_members):
+                  raise SystemExit('Required metadata checksums absent')
+              con=sqlite3.connect('file:'+str(dbs[0].resolve())+'?mode=ro',uri=True)
+              if con.execute('pragma integrity_check').fetchone()[0]!='ok' or con.execute('pragma foreign_key_check').fetchall():
+                  raise SystemExit('Batch database failed integrity checks')
+              rows=con.execute('select asset_url,retrieval_status,byte_count from asset').fetchall()
+              part=next(m for m in matrix if m['batch_index']==idx)
+              wanted={a['asset_url'] for a in planned[part['start']:part['end']]}
+              if {r[0] for r in rows}!=wanted or len(rows)!=part['expected_assets']:
+                  raise SystemExit('Batch does not exactly match its planned URLs')
+              for url,status,size in rows:
+                  if url in urls:
+                      raise SystemExit('Duplicate asset URL across saved batches')
+                  urls.add(url); statuses[status]+=1
+                  if status=='DOWNLOADED': downloaded_bytes+=size or 0
+              text_units+=con.execute('select count(*) from asset_text_unit').fetchone()[0]
+              con.close()
+          counts=collections.Counter()
+          for job in jobs:
+              if re.match(r'^acquire \(',job['name']):
+                  counts[job.get('conclusion') if job['status']=='completed' else job['status']]+=1
+          complete=run['status']=='completed'
+          aggregate_present=any(a['name']=='GEIPAN_LINKED_ASSET_METADATA_AND_TEXT_v0.1.1_REPAIRED_PAGES' and not a.get('expired') for a in artifacts)
+          recover=complete and not aggregate_present
+          report={
+              'verified_at_utc':datetime.datetime.now(datetime.timezone.utc).isoformat(),
+              'source_run_id':run['id'],'source_run_status':run['status'],'source_run_conclusion':run.get('conclusion'),
+              'source_run_url':run['html_url'],'planned_assets':len(expected),'planned_batches':len(matrix),
+              'batch_job_status_counts':dict(counts),'verified_saved_metadata_batches':len(batch_ids),
+              'verified_saved_asset_rows':len(urls),'saved_asset_status_counts':dict(statuses),
+              'saved_downloaded_bytes_reported_by_source':downloaded_bytes,'saved_text_units':text_units,
+              'assets_without_saved_metadata_yet':len(expected-urls),
+              'raw_shard_artifacts_seen':sum(a['name'].startswith('geipan-asset-v2-batch-') for a in artifacts),
+              'raw_binary_bytes_reverified_by_this_guard':False,
+              'original_aggregate_artifact_present':aggregate_present,
+              'state':'SOURCE_RUN_STILL_ACTIVE' if not complete else ('RECOVERY_REQUIRED' if recover else 'ORIGINAL_AGGREGATE_AVAILABLE'),
+              'canonical_atlas_modified':False,
+          }
+          (root/'REPORT.json').write_text(json.dumps(report,indent=2)+'\n')
+          print(json.dumps(report,indent=2))
+          with open(os.environ['GITHUB_STEP_SUMMARY'],'a') as f: f.write('## GEIPAN download checkpoint\n```json\n'+json.dumps(report,indent=2)+'\n```\n')
+          if recover and (urls!=expected or batch_ids!={m['batch_index'] for m in matrix}):
+              raise SystemExit('Source run ended with missing batches; preserving diagnostics, not declaring completion')
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f:
+              f.write('recover='+str(recover).lower()+'\nexpected_assets='+str(len(expected))+'\n')
+          PY
+      - name: Recover packaging from existing metadata, never redownload sources
+        if: steps.audit.outputs.recover == 'true'
+        env:
+          EXPECTED_ASSETS: ${{ steps.audit.outputs.expected_assets }}
+        run: |
+          set -euo pipefail
+          python ufo_atlas/ingestion/geipan/crawl_assets_v1.py aggregate --input-dir checkpoint/metadata-shards --output-dir aggregate --expected-assets "$EXPECTED_ASSETS"
+          python - <<'PY'
+          import hashlib,json,os,zipfile
+          from pathlib import Path
+          root=Path('aggregate')
+          artifacts=json.load(open('checkpoint/SOURCE_ARTIFACTS.json'))
+          shards=[a for a in artifacts if a['name'].startswith('geipan-asset-v2-batch-')]
+          (root/'RAW_ASSET_SHARD_ARTIFACTS.json').write_text(json.dumps(shards,indent=2)+'\n')
+          provenance={'original_asset_download_run_id':int(os.environ['SOURCE_RUN_ID']),'recovery_run_id':int(os.environ['GITHUB_RUN_ID']),'reason':'Recover packaging only; source downloads and canonical Atlas unchanged'}
+          (root/'RECOVERY_PROVENANCE.json').write_text(json.dumps(provenance,indent=2)+'\n')
+          sums=[hashlib.sha256(p.read_bytes()).hexdigest()+'  '+p.relative_to(root).as_posix() for p in sorted(root.rglob('*')) if p.is_file() and p.name!='SHA256SUMS.txt']
+          (root/'SHA256SUMS.txt').write_text('\n'.join(sums)+'\n')
+          archive=Path('GEIPAN_LINKED_ASSET_METADATA_AND_TEXT_v0.1.1_REPAIRED_PAGES.zip')
+          with zipfile.ZipFile(archive,'w',zipfile.ZIP_DEFLATED) as z:
+              for p in sorted(root.rglob('*')):
+                  if p.is_file(): z.write(p,p.relative_to(root))
+          with zipfile.ZipFile(archive) as z:
+              if z.testzip() is not None: raise SystemExit('Recovered archive CRC failure')
+          Path(str(archive)+'.sha256').write_text(hashlib.sha256(archive.read_bytes()).hexdigest()+'  '+archive.name+'\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: steps.audit.outputs.recover == 'true'
+        with:
+          name: GEIPAN_LINKED_ASSET_METADATA_AND_TEXT_v0.1.1_REPAIRED_PAGES
+          path: |
+            GEIPAN_LINKED_ASSET_METADATA_AND_TEXT_v0.1.1_REPAIRED_PAGES.zip
+            GEIPAN_LINKED_ASSET_METADATA_AND_TEXT_v0.1.1_REPAIRED_PAGES.zip.sha256
+            aggregate/RAW_ASSET_SHARD_ARTIFACTS.json
+            aggregate/RECOVERY_PROVENANCE.json
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
+      - name: Continue existing asset-remand repair from recovered package
+        if: steps.audit.outputs.recover == 'true'
+        run: gh workflow run repair_geipan_linked_assets.yml --ref main -f source_run_id="$GITHUB_RUN_ID"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: GEIPAN_DOWNLOAD_PROGRESS_CHECKPOINT
+          path: checkpoint/
+          if-no-files-found: error
+          retention-days: 90
