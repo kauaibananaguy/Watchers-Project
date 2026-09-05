@@ -1,4 +1,4 @@
-name: Temporary LAC UFO full scan acquisition and OCR
+name: Temporary LAC UFO chunk 0 recovery OCR
 
 on:
   push:
@@ -10,12 +10,12 @@ permissions:
   actions: read
 
 jobs:
-  process:
+  recover:
     strategy:
       fail-fast: false
-      max-parallel: 8
+      max-parallel: 16
       matrix:
-        chunk: [0, 1, 2, 3, 4, 5, 6, 7]
+        subchunk: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
@@ -25,7 +25,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: lac-ufo-complete-metadata-union
-          path: metadata
+          path: metadata_full
           github-token: ${{ github.token }}
           repository: kauaibananaguy/Watchers-Project
           run-id: 33924142848
@@ -35,20 +35,71 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq tesseract-ocr tesseract-ocr-eng tesseract-ocr-fra
           python -m pip install --quiet requests beautifulsoup4 pillow
-      - name: Acquire, hash, and OCR this scan partition
+      - name: Isolate one bounded subpartition of original chunk 0
         env:
-          CHUNK: ${{ matrix.chunk }}
-          CHUNK_COUNT: 8
+          SUBCHUNK: ${{ matrix.subchunk }}
+          SUBCHUNK_COUNT: 16
+        run: |
+          set -euo pipefail
+          mkdir -p metadata_filtered
+          python - <<'PY'
+          import csv, os
+          from pathlib import Path
+
+          source = next(Path('metadata_full').rglob('LAC_UFO_SOURCE_INDEX.csv'))
+          target = Path('metadata_filtered/LAC_UFO_SOURCE_INDEX.csv')
+          subchunk = int(os.environ['SUBCHUNK'])
+          subchunk_count = int(os.environ['SUBCHUNK_COUNT'])
+
+          with source.open('r', encoding='utf-8-sig', newline='') as handle:
+              rows = list(csv.DictReader(handle))
+              fields = list(rows[0].keys())
+
+          selected = []
+          for row in rows:
+              isn = (row.get('isn_id_nbr') or '').strip()
+              page = (row.get('page_id_nbr') or '').strip()
+              if not (isn.isdigit() and page.isdigit()):
+                  continue
+              if (int(isn) + int(page)) % 8 != 0:
+                  continue
+              secondary = (int(isn) * 1000003 + int(page)) % subchunk_count
+              if secondary == subchunk:
+                  selected.append(row)
+
+          selected.sort(key=lambda row: int(row['source_sequence']))
+          with target.open('w', encoding='utf-8-sig', newline='') as handle:
+              writer = csv.DictWriter(handle, fieldnames=fields)
+              writer.writeheader()
+              writer.writerows(selected)
+          print(f'subchunk {subchunk}: {len(selected)} source rows selected', flush=True)
+          PY
+      - name: Acquire, hash, and OCR this recovery subpartition
+        env:
+          CHUNK: 0
+          CHUNK_COUNT: 1
+          WORKERS: 2
+          METADATA_DIR: metadata_filtered
+          OUTPUT_DIR: output
           OMP_THREAD_LIMIT: 1
           OMP_NUM_THREADS: 1
         run: |
           set -euo pipefail
-          python tools/lac_scan_worker.py --metadata-root metadata --output output --chunk "$CHUNK" --chunk-count "$CHUNK_COUNT"
+          python scripts/lac_ufo_scan_ocr.py
           sha256sum output/* > output/SHA256SUMS.txt
-      - name: Upload scan/OCR partition
+      - name: Rename recovery report files
+        env:
+          SUBCHUNK: ${{ matrix.subchunk }}
+        run: |
+          set -euo pipefail
+          for file in output/*CHUNK_00*; do
+            [ -e "$file" ] || continue
+            mv "$file" "${file/CHUNK_00/CHUNK_00_SUB_${SUBCHUNK}}"
+          done
+      - name: Upload recovered scan/OCR subpartition
         uses: actions/upload-artifact@v4
         with:
-          name: lac-ufo-scan-ocr-${{ matrix.chunk }}
+          name: lac-ufo-scan-ocr-0-${{ matrix.subchunk }}
           path: output/
           if-no-files-found: error
           compression-level: 9
