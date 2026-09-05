@@ -1,0 +1,124 @@
+name: Prepare GEIPAN final import inputs v1
+
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/prepare_geipan_final_import_inputs_v1.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: geipan-final-import-inputs-v1
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      SOURCE_RUN_ID: '33914098603'
+      PYTHONUNBUFFERED: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Preserve repository and complete paginated acquisition inventory
+        run: |
+          set -euo pipefail
+          mkdir -p final-inputs/repository final-inputs/inventory final-inputs/metadata-shards final-inputs/plan
+          python - <<'PY'
+          import hashlib,json,shutil,subprocess
+          from pathlib import Path
+          dest=Path('final-inputs/repository')
+          rows=[]
+          paths=subprocess.check_output(['git','ls-files','-z']).decode().split('\0')
+          for name in paths:
+              if not name: continue
+              p=Path(name)
+              if not p.is_file() or p.is_symlink(): continue
+              target=dest/p; target.parent.mkdir(parents=True,exist_ok=True)
+              shutil.copyfile(p,target)
+              with p.open('rb') as f: h=hashlib.file_digest(f,'sha256').hexdigest()
+              rows.append({'path':name,'bytes':p.stat().st_size,'sha256':h})
+          Path('final-inputs/inventory/REPOSITORY_FILES.json').write_text(json.dumps(rows,indent=2)+'\n')
+          Path('final-inputs/inventory/REPOSITORY_COMMIT.txt').write_text(subprocess.check_output(['git','rev-parse','HEAD'],text=True))
+          PY
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID" > final-inputs/inventory/SOURCE_RUN.json
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID/jobs?per_page=100" > final-inputs/inventory/JOB_PAGES.json
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN_ID/artifacts?per_page=100" > final-inputs/inventory/ARTIFACT_PAGES.json
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/artifacts?per_page=100" > final-inputs/inventory/REPOSITORY_ARTIFACT_PAGES.json
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/releases?per_page=100" > final-inputs/inventory/RELEASE_PAGES.json
+      - name: Download only completed metadata and the immutable acquisition plan
+        run: |
+          set -euo pipefail
+          gh run download "$SOURCE_RUN_ID" -R "$GITHUB_REPOSITORY" -n geipan-linked-asset-v2-plan -D final-inputs/plan
+          gh run download "$SOURCE_RUN_ID" -R "$GITHUB_REPOSITORY" -p 'geipan-asset-v2-metadata-*' -D final-inputs/metadata-shards
+      - name: Reconcile source coverage and identify exact registry candidates
+        run: |
+          python - <<'PY'
+          import collections,datetime,hashlib,json,re,sqlite3
+          from pathlib import Path
+          root=Path('final-inputs'); inv=root/'inventory'
+          plan=json.loads((root/'plan/assets.json').read_text())
+          matrix=json.loads((root/'plan/matrix.json').read_text())['include']
+          plans={m['batch_index']:m for m in matrix}
+          expected={a['asset_url'] for a in plan}
+          if len(expected)!=len(plan): raise SystemExit('Duplicate URLs in source plan')
+          seen=set(); seen_batches=set(); statuses=collections.Counter(); hashes=0; checks=0
+          for p in sorted((root/'metadata-shards').rglob('BATCH_SUMMARY.json')):
+              summary=json.loads(p.read_text()); idx=int(summary['batch_index'])
+              if idx in seen_batches or idx not in plans: raise SystemExit('Invalid or duplicate batch')
+              seen_batches.add(idx)
+              dbs=list(p.parent.glob('*.sqlite'))
+              if len(dbs)!=1: raise SystemExit('Ambiguous batch database')
+              for line in (p.parent/'SHA256SUMS.txt').read_text().splitlines():
+                  digest,name=line.split(None,1); name=name.strip().lstrip('*')
+                  if name.startswith('blobs/'): continue
+                  target=p.parent/name
+                  if not target.resolve().is_relative_to(p.parent.resolve()): raise SystemExit('Unsafe checksum path')
+                  with target.open('rb') as f: actual=hashlib.file_digest(f,'sha256').hexdigest()
+                  if actual!=digest: raise SystemExit('Metadata checksum mismatch')
+                  checks+=1
+              con=sqlite3.connect('file:'+str(dbs[0].resolve())+'?mode=ro',uri=True)
+              if con.execute('pragma integrity_check').fetchone()[0]!='ok' or con.execute('pragma foreign_key_check').fetchall(): raise SystemExit('Invalid SQLite database')
+              rows=con.execute('select asset_url,retrieval_status from asset').fetchall()
+              m=plans[idx]; wanted={a['asset_url'] for a in plan[m['start']:m['end']]}
+              if {r[0] for r in rows}!=wanted or len(rows)!=len(wanted): raise SystemExit('Batch source coverage mismatch')
+              for url,status in rows:
+                  if url in seen: raise SystemExit('Duplicate source URL across batches')
+                  seen.add(url); statuses[status]+=1
+              for text,digest in con.execute('select text,text_sha256 from asset_text_unit'):
+                  if hashlib.sha256((text or '').encode()).hexdigest()!=digest: raise SystemExit('Extracted text checksum mismatch')
+                  hashes+=1
+              con.close()
+          files=json.loads((inv/'REPOSITORY_FILES.json').read_text())
+          all_artifacts=[a for p in json.loads((inv/'REPOSITORY_ARTIFACT_PAGES.json').read_text()) for a in p.get('artifacts',[])]
+          candidates=[a for a in all_artifacts if re.search(r'GMR|MASTER|CENTRAL_IMPORT|BOOTSTRAP',a['name'],re.I)]
+          registry_files=[f for f in files if re.search(r'UFO.*GMR|GMR.*UFO',f['path'],re.I) and f['path'].lower().endswith(('.json','.xlsx'))]
+          (inv/'CONTROL_ARTIFACT_CANDIDATES.json').write_text(json.dumps(candidates,indent=2)+'\n')
+          jobs=[j for p in json.loads((inv/'JOB_PAGES.json').read_text()) for j in p.get('jobs',[])]
+          job_counts=collections.Counter((j.get('conclusion') if j['status']=='completed' else j['status']) for j in jobs if j['name'].startswith('acquire ('))
+          report={'verified_at_utc':datetime.datetime.now(datetime.timezone.utc).isoformat(),'source_run_id':33914098603,'planned_asset_urls':len(expected),'planned_batches':len(matrix),'verified_metadata_batches':len(seen_batches),'verified_source_asset_rows':len(seen),'source_status_counts':dict(statuses),'remaining_planned_urls_without_completed_metadata':len(expected-seen),'metadata_file_checksums_verified':checks,'text_hashes_verified':hashes,'job_status_counts':dict(job_counts),'registry_filename_matches':registry_files,'control_artifact_candidates':len(candidates),'source_download_restarted':False,'canonical_atlas_changed':False,'scope':'IMPORT_INPUTS_NOT_A_VALIDATED_CANONICAL_IMPORT'}
+          (root/'PREFLIGHT_REPORT.json').write_text(json.dumps(report,indent=2)+'\n')
+          print(json.dumps(report,indent=2))
+          with open(__import__('os').environ['GITHUB_STEP_SUMMARY'],'a') as f: f.write('```json\n'+json.dumps(report,indent=2)+'\n```\n')
+          manifest=[]
+          for p in sorted(root.rglob('*')):
+              if p.is_file():
+                  with p.open('rb') as f: digest=hashlib.file_digest(f,'sha256').hexdigest()
+                  manifest.append({'path':p.relative_to(root).as_posix(),'bytes':p.stat().st_size,'sha256':digest})
+          (root/'manifest.json').write_text(json.dumps({'files':manifest},indent=2)+'\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: GEIPAN_FINAL_IMPORT_INPUTS_v1
+          path: final-inputs/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 90
