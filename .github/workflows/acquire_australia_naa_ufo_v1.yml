@@ -1,0 +1,118 @@
+name: Acquire Australia NAA UFO source inventory v1
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ufo_atlas/ingestion/australia/acquire_naa_ufo_v1.py
+      - .github/workflows/acquire_australia_naa_ufo_v1.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: australia-naa-ufo-source-inventory-v1
+  cancel-in-progress: false
+
+jobs:
+  inventory:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      item_count: ${{ steps.matrix.outputs.item_count }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check --no-cache-dir requests beautifulsoup4 'pypdf>=6,<7'
+      - name: Build archived Australian-government UAP file inventory
+        run: python ufo_atlas/ingestion/australia/acquire_naa_ufo_v1.py inventory --output-dir inventory
+      - id: matrix
+        run: |
+          python - <<'PY'
+          import json, os
+          rows=json.load(open('inventory/inventory.json'))
+          matrix={'include':[{'index':i} for i in range(len(rows))]}
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f:
+              f.write('matrix='+json.dumps(matrix,separators=(',',':'))+'\n')
+              f.write('item_count='+str(len(rows))+'\n')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: australia-naa-ufo-discovery-inventory-v1
+          path: inventory/
+          if-no-files-found: error
+          retention-days: 90
+
+  probe:
+    needs: inventory
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix: ${{ fromJSON(needs.inventory.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check --no-cache-dir requests beautifulsoup4 'pypdf>=6,<7'
+      - uses: actions/download-artifact@v4
+        with:
+          name: australia-naa-ufo-discovery-inventory-v1
+          path: inventory
+      - name: Probe official NAA item and first digital page
+        run: |
+          printf -v PAD '%04d' '${{ matrix.index }}'
+          python ufo_atlas/ingestion/australia/acquire_naa_ufo_v1.py acquire \
+            --inventory inventory/inventory.json \
+            --index '${{ matrix.index }}' \
+            --output-dir "result-${PAD}" \
+            --delay 1.25
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: australia-naa-ufo-item-${{ matrix.index }}
+          path: result-*/
+          if-no-files-found: warn
+          retention-days: 90
+
+  aggregate:
+    needs: [inventory, probe]
+    if: always() && needs.inventory.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --disable-pip-version-check --no-cache-dir requests beautifulsoup4 'pypdf>=6,<7'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: australia-naa-ufo-item-*
+          path: results
+          merge-multiple: false
+      - name: Aggregate source inventory without Atlas integration
+        run: python ufo_atlas/ingestion/australia/acquire_naa_ufo_v1.py aggregate --input-dir results --output-dir snapshot
+      - name: Package and verify
+        run: |
+          (cd snapshot && zip -q -r ../AUSTRALIA_NAA_UFO_SOURCE_SNAPSHOT_v0.1.0.zip .)
+          sha256sum AUSTRALIA_NAA_UFO_SOURCE_SNAPSHOT_v0.1.0.zip > AUSTRALIA_NAA_UFO_SOURCE_SNAPSHOT_v0.1.0.zip.sha256
+          unzip -t AUSTRALIA_NAA_UFO_SOURCE_SNAPSHOT_v0.1.0.zip >/dev/null
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AUSTRALIA_NAA_UFO_SOURCE_SNAPSHOT_v0.1.0
+          path: |
+            AUSTRALIA_NAA_UFO_SOURCE_SNAPSHOT_v0.1.0.zip
+            AUSTRALIA_NAA_UFO_SOURCE_SNAPSHOT_v0.1.0.zip.sha256
+            snapshot/SUMMARY.json
+            snapshot/ARCHIVE_ITEM_INDEX.csv
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
