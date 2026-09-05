@@ -1,0 +1,48 @@
+name: Build Australia NAA UFO complete file ledger v2
+on:
+  push:
+    branches: [main]
+    paths:
+      - ufo_atlas/ingestion/australia/build_naa_ufo_inventory_v2.py
+      - .github/workflows/build_australia_naa_inventory_v2.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: australia-naa-ufo-complete-ledger-v2
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: python -m pip install --disable-pip-version-check --no-cache-dir requests 'pypdf>=6,<7'
+      - run: python ufo_atlas/ingestion/australia/build_naa_ufo_inventory_v2.py --output-dir ledger
+      - name: Verify package
+        run: |
+          python - <<'PY'
+          import json,sqlite3
+          s=json.load(open('ledger/SUMMARY.json'))
+          assert s['status']=='PASS' and s['numbered_entries']==155 and s['section_a_entries']==123 and s['section_b_entries']==32 and s['section_c_preserved'] is True
+          db=sqlite3.connect('ledger/AUSTRALIA_GOVERNMENT_UFO_FILE_INVENTORY_v0.2.0.sqlite')
+          assert db.execute('pragma integrity_check').fetchone()[0]=='ok'
+          assert db.execute('select count(*) from numbered_file').fetchone()[0]==155
+          assert [x[0] for x in db.execute('select entry_number from numbered_file order by entry_number')]==list(range(1,156))
+          db.close()
+          PY
+          (cd ledger && zip -q -r ../AUSTRALIA_GOVERNMENT_UFO_FILE_INVENTORY_v0.2.0.zip .)
+          sha256sum AUSTRALIA_GOVERNMENT_UFO_FILE_INVENTORY_v0.2.0.zip > AUSTRALIA_GOVERNMENT_UFO_FILE_INVENTORY_v0.2.0.zip.sha256
+          unzip -t AUSTRALIA_GOVERNMENT_UFO_FILE_INVENTORY_v0.2.0.zip >/dev/null
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AUSTRALIA_GOVERNMENT_UFO_FILE_INVENTORY_v0.2.0
+          path: |
+            AUSTRALIA_GOVERNMENT_UFO_FILE_INVENTORY_v0.2.0.zip
+            AUSTRALIA_GOVERNMENT_UFO_FILE_INVENTORY_v0.2.0.zip.sha256
+            ledger/SUMMARY.json
+          retention-days: 90
+          compression-level: 0
+          if-no-files-found: error
