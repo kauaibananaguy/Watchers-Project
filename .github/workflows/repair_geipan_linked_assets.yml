@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       source_run_id:
-        description: Successful GEIPAN linked-assets v2 run ID; blank uses latest successful run
+        description: Linked-asset aggregate run ID, including a verified packaging-recovery run
         required: false
         default: ''
 
@@ -36,6 +36,7 @@ jobs:
       repair_queue_count: ${{ steps.plan.outputs.repair_queue_count }}
       source_run_id: ${{ steps.resolve.outputs.source_run_id }}
       source_artifact_id: ${{ steps.resolve.outputs.source_artifact_id }}
+      initial_asset_run_id: ${{ steps.resolve.outputs.initial_asset_run_id }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -54,9 +55,9 @@ jobs:
           if [ -z "$RUN_ID" ]; then
             RUN_ID="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/acquire_geipan_linked_assets_v2.yml/runs?status=success&per_page=1" --jq '.workflow_runs[0].id')"
           fi
-          test -n "$RUN_ID"
-          ARTIFACT_ID="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/artifacts?per_page=100" --jq '.artifacts[] | select(.name=="GEIPAN_LINKED_ASSET_METADATA_AND_TEXT_v0.1.1_REPAIRED_PAGES") | .id' | head -1)"
-          test -n "$ARTIFACT_ID"
+          [[ "$RUN_ID" =~ ^[0-9]+$ ]]
+          ARTIFACT_ID="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/runs/${RUN_ID}/artifacts?per_page=100" --jq '.artifacts[] | select(.name=="GEIPAN_LINKED_ASSET_METADATA_AND_TEXT_v0.1.1_REPAIRED_PAGES" and .expired==false) | .id' | head -1)"
+          [[ "$ARTIFACT_ID" =~ ^[0-9]+$ ]]
           curl --fail --location \
             -H "Authorization: Bearer ${GITHUB_TOKEN}" \
             -H "Accept: application/vnd.github+json" \
@@ -72,6 +73,20 @@ jobs:
           test -n "$DB"
           echo "source_run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
           echo "source_artifact_id=$ARTIFACT_ID" >> "$GITHUB_OUTPUT"
+          SOURCE_AGGREGATE_RUN_ID="$RUN_ID" python - <<'PY'
+          import json,os
+          from pathlib import Path
+          provenance=list(Path('source-snapshot').rglob('RECOVERY_PROVENANCE.json'))
+          if len(provenance)>1:
+              raise SystemExit('Ambiguous aggregate recovery provenance')
+          initial=int(os.environ['SOURCE_AGGREGATE_RUN_ID'])
+          if provenance:
+              initial=int(json.loads(provenance[0].read_text())['original_asset_download_run_id'])
+          if initial<=0:
+              raise SystemExit('Invalid original asset-download run ID')
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f:
+              f.write(f'initial_asset_run_id={initial}\n')
+          PY
       - id: plan
         name: Build immutable asset-remand repair plan
         run: |
@@ -198,29 +213,56 @@ jobs:
             --repairs-dir repair-results \
             --output-dir repaired \
             --expected-assets '${{ needs.plan.outputs.expected_assets }}'
-      - name: Package repaired asset result and diagnostics
+      - name: Record repair raw-shard artifact identities and original source lineage
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          AGGREGATE_SOURCE_RUN_ID: ${{ needs.plan.outputs.source_run_id }}
+          INITIAL_ASSET_RUN_ID: ${{ needs.plan.outputs.initial_asset_run_id }}
+        run: |
+          set -euo pipefail
+          test -f repaired/REPAIR_SUMMARY.json
+          gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100" > all-artifacts.json
+          python - <<'PY'
+          import json,os
+          from pathlib import Path
+          pages=json.load(open('all-artifacts.json'))
+          artifacts=[a for page in pages for a in page.get('artifacts',[])]
+          if len({a['id'] for a in artifacts})!=len(artifacts):
+              raise SystemExit('Duplicate artifact identities across API pages')
+          shards=[a for a in artifacts if str(a.get('name','')).startswith('geipan-asset-repair-batch-')]
+          if any(a.get('expired') for a in shards):
+              raise SystemExit('Expired raw repair shard')
+          Path('repaired/RAW_ASSET_REPAIR_SHARD_ARTIFACTS.json').write_text(json.dumps(shards,indent=2)+'\n',encoding='utf-8')
+          provenance={
+              'aggregate_source_run_id':int(os.environ['AGGREGATE_SOURCE_RUN_ID']),
+              'initial_asset_run_id':int(os.environ['INITIAL_ASSET_RUN_ID']),
+              'repair_run_id':int(os.environ['GITHUB_RUN_ID']),
+          }
+          Path('repaired/UPSTREAM_RUN_PROVENANCE.json').write_text(json.dumps(provenance,indent=2)+'\n',encoding='utf-8')
+          PY
+      - name: Package repaired asset result and diagnostics with complete manifests
         if: always()
         run: |
           set -euo pipefail
           test -f repaired/REPAIR_SUMMARY.json
+          test -f repaired/RAW_ASSET_REPAIR_SHARD_ARTIFACTS.json
+          test -f repaired/UPSTREAM_RUN_PROVENANCE.json
+          python - <<'PY'
+          import hashlib
+          from pathlib import Path
+          root=Path('repaired')
+          rows=[]
+          for p in sorted(root.rglob('*')):
+              if p.is_file() and p.name!='SHA256SUMS.txt':
+                  with p.open('rb') as f:
+                      rows.append(hashlib.file_digest(f,'sha256').hexdigest()+'  '+p.relative_to(root).as_posix())
+          (root/'SHA256SUMS.txt').write_text('\n'.join(rows)+'\n',encoding='utf-8')
+          PY
           (cd repaired && zip -q -r ../GEIPAN_LINKED_ASSET_METADATA_AND_TEXT_v0.1.2_REPAIRED.zip .)
           sha256sum GEIPAN_LINKED_ASSET_METADATA_AND_TEXT_v0.1.2_REPAIRED.zip > \
             GEIPAN_LINKED_ASSET_METADATA_AND_TEXT_v0.1.2_REPAIRED.zip.sha256
           unzip -t GEIPAN_LINKED_ASSET_METADATA_AND_TEXT_v0.1.2_REPAIRED.zip >/dev/null
-      - name: Record repair raw-shard artifact identities
-        if: always()
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100" > all-artifacts.json
-          python - <<'PY'
-          import json
-          from pathlib import Path
-          payload=json.load(open('all-artifacts.json'))
-          artifacts=payload.get('artifacts',[]) if isinstance(payload,dict) else []
-          shards=[a for a in artifacts if str(a.get('name','')).startswith('geipan-asset-repair-batch-')]
-          Path('repaired/RAW_ASSET_REPAIR_SHARD_ARTIFACTS.json').write_text(json.dumps(shards,indent=2)+'\n',encoding='utf-8')
-          PY
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -231,6 +273,7 @@ jobs:
             repaired/REPAIR_SUMMARY.json
             repaired/REMAINING_REMANDS.csv
             repaired/RAW_ASSET_REPAIR_SHARD_ARTIFACTS.json
+            repaired/UPSTREAM_RUN_PROVENANCE.json
           if-no-files-found: warn
           compression-level: 0
           retention-days: 90
@@ -251,10 +294,13 @@ jobs:
           cp repaired/REPAIR_SUMMARY.json ufo_atlas/ingestion/geipan/assets_repaired_latest/
           cp repaired/REMAINING_REMANDS.csv ufo_atlas/ingestion/geipan/assets_repaired_latest/
           cp repaired/RAW_ASSET_REPAIR_SHARD_ARTIFACTS.json ufo_atlas/ingestion/geipan/assets_repaired_latest/
+          cp repaired/UPSTREAM_RUN_PROVENANCE.json ufo_atlas/ingestion/geipan/assets_repaired_latest/
           cp GEIPAN_LINKED_ASSET_METADATA_AND_TEXT_v0.1.2_REPAIRED.zip.sha256 \
             ufo_atlas/ingestion/geipan/assets_repaired_latest/PACKAGE_SHA256.txt
           printf '%s\n' '${{ needs.plan.outputs.source_run_id }}' > \
             ufo_atlas/ingestion/geipan/assets_repaired_latest/SOURCE_RUN_ID.txt
+          printf '%s\n' '${{ needs.plan.outputs.initial_asset_run_id }}' > \
+            ufo_atlas/ingestion/geipan/assets_repaired_latest/INITIAL_ASSET_RUN_ID.txt
           printf '%s\n' "${GITHUB_RUN_ID}" > \
             ufo_atlas/ingestion/geipan/assets_repaired_latest/WORKFLOW_RUN_ID.txt
           git config user.name 'github-actions[bot]'
@@ -262,4 +308,8 @@ jobs:
           git add ufo_atlas/ingestion/geipan/assets_repaired_latest
           if git diff --cached --quiet; then exit 0; fi
           git commit -m 'Preserve repaired GEIPAN linked-asset evidence [skip ci]'
-          git push
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then exit 0; fi
+            git pull --rebase origin main
+          done
+          exit 1
