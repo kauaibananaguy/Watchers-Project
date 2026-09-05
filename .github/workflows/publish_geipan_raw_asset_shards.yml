@@ -2,10 +2,8 @@ name: Publish GEIPAN raw source asset shards
 
 on:
   workflow_run:
-    workflows:
-      - 'Repair GEIPAN linked asset remands'
-    types:
-      - completed
+    workflows: ['Repair GEIPAN linked asset remands']
+    types: [completed]
   workflow_dispatch:
     inputs:
       repair_run_id:
@@ -13,7 +11,7 @@ on:
         required: false
         default: ''
       initial_asset_run_id:
-        description: Successful linked-assets-v2 run ID; blank uses latest successful run
+        description: Original download run; blank follows the repaired artifact's recorded lineage
         required: false
         default: ''
 
@@ -37,7 +35,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Resolve source workflow runs
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Resolve repaired source lineage
         id: runs
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -50,101 +51,153 @@ jobs:
           if [ -z "$REPAIR_RUN_ID" ]; then
             REPAIR_RUN_ID="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/repair_geipan_linked_assets.yml/runs?status=success&per_page=1" --jq '.workflow_runs[0].id')"
           fi
-          INITIAL_RUN_ID="${INPUT_INITIAL_RUN_ID:-}"
-          if [ -z "$INITIAL_RUN_ID" ]; then
-            INITIAL_RUN_ID="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/acquire_geipan_linked_assets_v2.yml/runs?status=success&per_page=1" --jq '.workflow_runs[0].id')"
-          fi
-          test -n "$REPAIR_RUN_ID"
-          test -n "$INITIAL_RUN_ID"
-          echo "repair_run_id=$REPAIR_RUN_ID" >> "$GITHUB_OUTPUT"
-          echo "initial_run_id=$INITIAL_RUN_ID" >> "$GITHUB_OUTPUT"
-      - name: Download and inventory raw source shards
+          [[ "$REPAIR_RUN_ID" =~ ^[0-9]+$ ]]
+          gh run download "$REPAIR_RUN_ID" -R "$GITHUB_REPOSITORY" -n GEIPAN_LINKED_ASSET_METADATA_AND_TEXT_v0.1.2_REPAIRED -D repaired-lineage
+          REPAIR_RUN_ID="$REPAIR_RUN_ID" python - <<'PY'
+          import json,os,subprocess
+          from pathlib import Path
+          files=list(Path('repaired-lineage').rglob('UPSTREAM_RUN_PROVENANCE.json'))
+          if len(files)!=1:
+              raise SystemExit('Exactly one upstream provenance record is required; do not guess the latest download run')
+          lineage=json.loads(files[0].read_text())
+          repair=int(os.environ['REPAIR_RUN_ID'])
+          initial=int(lineage['initial_asset_run_id'])
+          if int(lineage['repair_run_id'])!=repair or initial<=0:
+              raise SystemExit('Invalid repaired source lineage')
+          supplied=os.environ.get('INPUT_INITIAL_RUN_ID','')
+          if supplied and int(supplied)!=initial:
+              raise SystemExit('Requested initial run disagrees with the repaired source lineage')
+          repo=os.environ['GITHUB_REPOSITORY']
+          for run_id,path in [(repair,'.github/workflows/repair_geipan_linked_assets.yml'),(initial,'.github/workflows/acquire_geipan_linked_assets_v2.yml')]:
+              run=json.loads(subprocess.check_output(['gh','api',f'repos/{repo}/actions/runs/{run_id}'],text=True))
+              if run['path']!=path or run['status']!='completed':
+                  raise SystemExit('Source workflow mismatch or unfinished source run')
+              if run_id==repair and run.get('conclusion')!='success':
+                  raise SystemExit('Repair run has not passed')
+          with open(os.environ['GITHUB_OUTPUT'],'a') as f:
+              f.write(f'repair_run_id={repair}\ninitial_run_id={initial}\n')
+          Path('UPSTREAM_RUN_PROVENANCE.json').write_text(json.dumps(lineage,indent=2)+'\n')
+          PY
+      - name: Inventory every source-artifact page and transfer one verified shard at a time
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPAIR_RUN_ID: ${{ steps.runs.outputs.repair_run_id }}
           INITIAL_RUN_ID: ${{ steps.runs.outputs.initial_run_id }}
         run: |
-          set -euo pipefail
-          mkdir -p raw-shards release-assets
           python - <<'PY'
-          import json,os,subprocess
+          import hashlib,json,os,re,subprocess,zipfile
           from pathlib import Path
-          repo=os.environ['GITHUB_REPOSITORY']
-          runs=[
-              ('initial',os.environ['INITIAL_RUN_ID'],'geipan-asset-v2-batch-'),
-              ('repair',os.environ['REPAIR_RUN_ID'],'geipan-asset-repair-batch-'),
-          ]
+          repo=os.environ['GITHUB_REPOSITORY']; tag=os.environ['RELEASE_TAG']
+          def call(args):
+              subprocess.run(args,check=True)
+          def digest(path):
+              with path.open('rb') as f:
+                  return hashlib.file_digest(f,'sha256').hexdigest()
+          def flatten(pages):
+              if not isinstance(pages,list) or any(not isinstance(p,dict) for p in pages):
+                  raise ValueError('Expected --slurp array of API pages')
+              rows=[a for p in pages for a in p.get('artifacts',[])]
+              if len({a['id'] for a in rows})!=len(rows):
+                  raise ValueError('Duplicate artifact identities across pages')
+              return rows
           selected=[]
-          for phase,run_id,prefix in runs:
-              raw=subprocess.check_output(['gh','api','--paginate',f'repos/{repo}/actions/runs/{run_id}/artifacts?per_page=100'],text=True)
-              payload=json.loads(raw)
-              for artifact in payload.get('artifacts',[]):
-                  if str(artifact.get('name','')).startswith(prefix):
-                      selected.append({'phase':phase,'run_id':int(run_id),**artifact})
+          for phase,run_id,prefix in [('initial',os.environ['INITIAL_RUN_ID'],'geipan-asset-v2-batch-'),('repair',os.environ['REPAIR_RUN_ID'],'geipan-asset-repair-batch-')]:
+              pages=json.loads(subprocess.check_output(['gh','api','--paginate','--slurp',f'repos/{repo}/actions/runs/{run_id}/artifacts?per_page=100'],text=True))
+              all_rows=flatten(pages)
+              meta_prefix=prefix.replace('batch-','metadata-')
+              raw_names={a['name'] for a in all_rows if a['name'].startswith(prefix)}
+              expected_names={prefix+a['name'][len(meta_prefix):] for a in all_rows if a['name'].startswith(meta_prefix)}
+              if raw_names!=expected_names:
+                  raise SystemExit('Raw-shard and metadata-shard coverage disagree for '+phase)
+              for a in all_rows:
+                  if a['name'].startswith(prefix):
+                      if not re.fullmatch(re.escape(prefix)+r'\d{4}',a['name']) or a.get('expired'):
+                          raise SystemExit('Invalid or expired source shard')
+                      selected.append({'phase':phase,'run_id':int(run_id),**a})
           selected.sort(key=lambda a:(a['phase'],a['name']))
-          if not selected:
-              raise SystemExit('No raw source-shard artifacts found')
+          if not any(a['phase']=='initial' for a in selected):
+              raise SystemExit('No original raw source shards found')
+          if len({a['name'] for a in selected})!=len(selected):
+              raise SystemExit('Duplicate raw shard names')
           Path('RAW_ASSET_SOURCE_ARTIFACTS.json').write_text(json.dumps(selected,indent=2)+'\n')
-          for artifact in selected:
-              name=artifact['name']+'.artifact.zip'
-              subprocess.run(['bash','-lc',f'''curl --fail --location -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" "https://api.github.com/repos/{repo}/actions/artifacts/{artifact['id']}/zip" --output "raw-shards/{name}"'''],check=True)
+          release=subprocess.run(['gh','release','view',tag],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+          if release.returncode:
+              call(['gh','release','create',tag,'--draft','--title','UFO Atlas GEIPAN preserved source-asset shards v0.1.2','--notes','Transfer incomplete; publication follows successful verification of all listed shards.'])
+          work=Path('raw-shards');work.mkdir(exist_ok=True)
+          archive_sums=[];release_assets=[]
+          def upload(path):
+              item={'name':path.name,'bytes':path.stat().st_size,'sha256':digest(path)}
+              call(['gh','release','upload',tag,str(path),'--clobber'])
+              release_assets.append(item)
+          for a in selected:
+              archive=work/(a['name']+'.artifact.zip')
+              expected=a.get('digest','')
+              if not re.fullmatch(r'sha256:[0-9a-f]{64}',expected):
+                  raise SystemExit('Source artifact SHA-256 is required')
+              # Do not print the authorization header in an exception.
+              result=subprocess.run(['curl','--fail','--location','--retry','3','--retry-delay','10','--max-time','1800','--silent','--show-error','-H','Authorization: Bearer '+os.environ['GH_TOKEN'],'-H','Accept: application/vnd.github+json','-H','X-GitHub-Api-Version: 2022-11-28',f'https://api.github.com/repos/{repo}/actions/artifacts/{a["id"]}/zip','--output',str(archive)])
+              if result.returncode:
+                  raise SystemExit('Artifact download failed: '+str(a['id']))
+              actual=digest(archive)
+              if 'sha256:'+actual!=expected or archive.stat().st_size!=a['size_in_bytes']:
+                  raise SystemExit('Raw artifact digest or byte-count mismatch: '+a['name'])
+              with zipfile.ZipFile(archive) as z:
+                  if z.testzip() is not None:
+                      raise SystemExit('Raw artifact ZIP integrity failure: '+a['name'])
+              archive_sums.append(actual+'  '+archive.name)
+              if archive.stat().st_size<=1900000000:
+                  upload(archive)
+              else:
+                  with archive.open('rb') as source:
+                      remaining=archive.stat().st_size; index=0
+                      while remaining:
+                          part=work/(archive.name+f'.part-{index:03d}')
+                          target=min(1800000000,remaining);written=0
+                          with part.open('wb') as out:
+                              while written<target:
+                                  data=source.read(min(8*1024*1024,target-written))
+                                  if not data:
+                                      raise SystemExit('Unexpected end of source shard')
+                                  out.write(data);written+=len(data)
+                          upload(part);part.unlink();remaining-=written;index+=1
+              archive.unlink()
+          manifest={'status':'PASS_ALL_LISTED_RAW_SHARDS_TRANSFERRED','release_tag':tag,'initial_asset_run_id':int(os.environ['INITIAL_RUN_ID']),'repair_run_id':int(os.environ['REPAIR_RUN_ID']),'source_artifacts':selected,'release_assets':release_assets,'validation':'Each archive matched its GitHub SHA-256 and byte count and passed ZIP CRC verification. This is not canonical Atlas import validation.'}
+          Path('RAW_ASSET_RELEASE_MANIFEST.json').write_text(json.dumps(manifest,indent=2)+'\n')
+          Path('RAW_ASSET_ARCHIVE_SHA256SUMS.txt').write_text('\n'.join(archive_sums)+'\n')
+          Path('RELEASE_ASSET_SHA256SUMS.txt').write_text('\n'.join(a['sha256']+'  '+a['name'] for a in release_assets)+'\n')
+          call(['gh','release','upload',tag,'RAW_ASSET_RELEASE_MANIFEST.json','RAW_ASSET_SOURCE_ARTIFACTS.json','RAW_ASSET_ARCHIVE_SHA256SUMS.txt','RELEASE_ASSET_SHA256SUMS.txt','UPSTREAM_RUN_PROVENANCE.json','--clobber'])
+          call(['gh','release','edit',tag,'--draft=false','--notes','Preserved public GEIPAN source-asset shards. All listed source archives matched their acquisition hashes and passed ZIP CRC verification. See the manifest for original download and repair lineage. This is source preservation, not a completed canonical UFO Atlas import.'])
           PY
-          for archive in raw-shards/*.artifact.zip; do
-            unzip -t "$archive" >/dev/null
-            size="$(stat -c '%s' "$archive")"
-            base="$(basename "$archive")"
-            if [ "$size" -le 1900000000 ]; then
-              cp "$archive" "release-assets/$base"
-            else
-              split -b 1800000000 -d -a 3 "$archive" "release-assets/${base}.part-"
-            fi
-          done
-          sha256sum raw-shards/*.artifact.zip > RAW_ASSET_ARCHIVE_SHA256SUMS.txt
-          sha256sum release-assets/* > RELEASE_ASSET_SHA256SUMS.txt
-          python - <<'PY'
-          import hashlib,json,os
-          from pathlib import Path
-          artifacts=json.load(open('RAW_ASSET_SOURCE_ARTIFACTS.json'))
-          release=[]
-          for path in sorted(Path('release-assets').iterdir()):
-              h=hashlib.sha256(path.read_bytes()).hexdigest()
-              release.append({'name':path.name,'bytes':path.stat().st_size,'sha256':h})
-          payload={
-              'release_tag':os.environ['RELEASE_TAG'],
-              'initial_asset_run_id':int(os.environ['INITIAL_RUN_ID']),
-              'repair_run_id':int(os.environ['REPAIR_RUN_ID']),
-              'source_artifacts':artifacts,
-              'release_assets':release,
-          }
-          Path('RAW_ASSET_RELEASE_MANIFEST.json').write_text(json.dumps(payload,indent=2)+'\n')
-          PY
-      - name: Publish or update durable raw-source release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          if ! gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release create "$RELEASE_TAG" \
-              --title 'UFO Atlas GEIPAN preserved source-asset shards v0.1.2' \
-              --notes 'Durable raw source shards for publicly linked GEIPAN case documents and media. These are source preservation artifacts, not a separate public GEIPAN database. See RAW_ASSET_RELEASE_MANIFEST.json for workflow and checksum provenance.'
-          fi
-          gh release upload "$RELEASE_TAG" release-assets/* --clobber
-          gh release upload "$RELEASE_TAG" RAW_ASSET_RELEASE_MANIFEST.json RAW_ASSET_ARCHIVE_SHA256SUMS.txt RELEASE_ASSET_SHA256SUMS.txt --clobber
       - name: Preserve release evidence in repository
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          mkdir -p ufo_atlas/ingestion/geipan/raw_asset_release
-          cp RAW_ASSET_RELEASE_MANIFEST.json ufo_atlas/ingestion/geipan/raw_asset_release/
-          cp RAW_ASSET_ARCHIVE_SHA256SUMS.txt ufo_atlas/ingestion/geipan/raw_asset_release/
-          cp RELEASE_ASSET_SHA256SUMS.txt ufo_atlas/ingestion/geipan/raw_asset_release/
-          gh release view "$RELEASE_TAG" --json tagName,name,url,assets > ufo_atlas/ingestion/geipan/raw_asset_release/RELEASE.json
-          printf '%s\n' '${{ steps.runs.outputs.initial_run_id }}' > ufo_atlas/ingestion/geipan/raw_asset_release/INITIAL_ASSET_RUN_ID.txt
-          printf '%s\n' '${{ steps.runs.outputs.repair_run_id }}' > ufo_atlas/ingestion/geipan/raw_asset_release/REPAIR_RUN_ID.txt
+          DEST=ufo_atlas/ingestion/geipan/raw_asset_release
+          mkdir -p "$DEST"
+          cp RAW_ASSET_RELEASE_MANIFEST.json RAW_ASSET_SOURCE_ARTIFACTS.json RAW_ASSET_ARCHIVE_SHA256SUMS.txt RELEASE_ASSET_SHA256SUMS.txt UPSTREAM_RUN_PROVENANCE.json "$DEST/"
+          gh release view "$RELEASE_TAG" --json tagName,name,url,assets > "$DEST/RELEASE.json"
+          printf '%s\n' '${{ steps.runs.outputs.initial_run_id }}' > "$DEST/INITIAL_ASSET_RUN_ID.txt"
+          printf '%s\n' '${{ steps.runs.outputs.repair_run_id }}' > "$DEST/REPAIR_RUN_ID.txt"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add ufo_atlas/ingestion/geipan/raw_asset_release
+          git add "$DEST"
           if git diff --cached --quiet; then exit 0; fi
-          git commit -m 'Preserve durable GEIPAN raw source-asset release [skip ci]'
-          git push
+          git commit -m 'Preserve verified GEIPAN raw source-asset release [skip ci]'
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then exit 0; fi
+            git pull --rebase origin main
+          done
+          exit 1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: GEIPAN_RAW_PUBLICATION_DIAGNOSTICS
+          path: |
+            RAW_ASSET_SOURCE_ARTIFACTS.json
+            RAW_ASSET_RELEASE_MANIFEST.json
+            RAW_ASSET_ARCHIVE_SHA256SUMS.txt
+            RELEASE_ASSET_SHA256SUMS.txt
+            UPSTREAM_RUN_PROVENANCE.json
+          if-no-files-found: warn
+          retention-days: 90
