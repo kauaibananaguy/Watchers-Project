@@ -19,6 +19,7 @@ from pathlib import Path
 
 import crawl_assets_v1 as base
 import crawl_case_packets as shared
+import asset_recovery_policy_v013 as policy
 
 ORIGINAL_REQUEST_BYTES = shared.request_bytes
 USER_AGENT = "Watchers-UFO-Atlas/1.0 (source-remand-recovery; low-rate archival lookup)"
@@ -145,38 +146,21 @@ def simple_request(
 
 
 def cdx_capture_urls(original_url: str) -> list[str]:
-    """Return newest public Internet Archive captures for an exact URL."""
-    params = urllib.parse.urlencode(
-        {
-            "url": original_url,
-            "output": "json",
-            "filter": "statuscode:200",
-            "fl": "timestamp,original,statuscode,mimetype,digest,length",
-            "limit": "-10",
-        }
-    )
+    """Return exact-URL captures, distinguishing unavailable CDX from no captures."""
+    params = urllib.parse.urlencode({
+        "url": original_url, "output": "json", "filter": "statuscode:200",
+        "fl": "timestamp,original,statuscode,mimetype,digest,length", "limit": "-10",
+    })
     cdx_url = "https://web.archive.org/cdx/search/cdx?" + params
     try:
         data, _, _ = simple_request(cdx_url, timeout=120)
-        payload = json.loads(data.decode("utf-8", errors="replace"))
-    except Exception:
-        return []
-    if not isinstance(payload, list) or len(payload) < 2:
-        return []
-    captures: list[str] = []
-    for row in reversed(payload[1:]):
-        if not isinstance(row, list) or len(row) < 2:
-            continue
-        timestamp = str(row[0])
-        archived_original = str(row[1])
-        captures.append(
-            f"https://web.archive.org/web/{timestamp}id_/{archived_original}"
-        )
-    return unique(captures)
+        return policy.parse_cdx_capture_data(data)
+    except Exception as exc:
+        raise RuntimeError(f"ARCHIVE_LOOKUP_INCOMPLETE: {type(exc).__name__}: {exc}") from exc
 
 
 def is_wayback_error_page(data: bytes, headers: dict[str, str]) -> bool:
-    content_type = headers.get("Content-Type", "").lower()
+    content_type = next((v.lower() for k, v in headers.items() if k.lower() == "content-type"), "")
     if "text/html" not in content_type:
         return False
     sample = data[:200000].lower()
@@ -190,23 +174,7 @@ def is_wayback_error_page(data: bytes, headers: dict[str, str]) -> bool:
 
 
 def classify_errors(errors: list[str]) -> str:
-    text = "\n".join(errors).lower()
-    if "http error 410" in text:
-        return "SOURCE_GONE_410"
-    if "http error 404" in text:
-        return "SOURCE_NOT_AVAILABLE_404"
-    if "http error 403" in text:
-        return "SOURCE_FORBIDDEN_403"
-    if any(
-        token in text
-        for token in (
-            "name or service not known",
-            "temporary failure in name resolution",
-            "nodename nor servname",
-        )
-    ):
-        return "SOURCE_HOST_UNRESOLVABLE"
-    return "ARCHIVAL_RECOVERY_FAILED"
+    return policy.classify_recovery_errors(errors)
 
 
 def resilient_request_bytes(
@@ -227,6 +195,7 @@ def resilient_request_bytes(
                 retries=max(1, min(int(retries), 3)),
                 timeout=min(int(timeout), 300),
             )
+            policy.validate_recovered_payload(data, source_url, headers)
             headers = dict(headers)
             headers.update(
                 {
@@ -246,7 +215,13 @@ def resilient_request_bytes(
     )
     archive_seen: set[str] = set()
     for archive_source in archive_queries:
-        for capture_url in cdx_capture_urls(archive_source):
+        try:
+            capture_urls = cdx_capture_urls(archive_source)
+        except Exception as exc:
+            errors.append(f"ARCHIVE_LOOKUP {archive_source}: {type(exc).__name__}: {exc}")
+            time.sleep(0.5)
+            continue
+        for capture_url in capture_urls:
             if capture_url in archive_seen:
                 continue
             archive_seen.add(capture_url)
@@ -256,6 +231,7 @@ def resilient_request_bytes(
                 )
                 if is_wayback_error_page(data, headers):
                     raise RuntimeError("Wayback error or exclusion page")
+                policy.validate_recovered_payload(data, source_url, headers)
                 headers = dict(headers)
                 headers.update(
                     {
