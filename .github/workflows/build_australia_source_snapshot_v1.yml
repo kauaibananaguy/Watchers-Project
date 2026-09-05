@@ -1,0 +1,67 @@
+name: Build Australia government UFO source snapshot v1
+on:
+  push:
+    branches: [main]
+    paths:
+      - ufo_atlas/ingestion/australia/build_australia_source_snapshot_v1.py
+      - .github/workflows/build_australia_source_snapshot_v1.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: australia-government-ufo-source-snapshot-v1
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      LEDGER_ARTIFACT_ID: '9971635443'
+      TEXT_ARTIFACT_ID: '9971660060'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - name: Download exact verified upstream artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p upstream/ledger upstream/text
+          gh api repos/$GITHUB_REPOSITORY/actions/artifacts/$LEDGER_ARTIFACT_ID/zip > ledger-artifact.zip
+          gh api repos/$GITHUB_REPOSITORY/actions/artifacts/$TEXT_ARTIFACT_ID/zip > text-artifact.zip
+          unzip -q ledger-artifact.zip -d upstream/ledger-outer
+          unzip -q text-artifact.zip -d upstream/text-outer
+          unzip -q upstream/ledger-outer/AUSTRALIA_GOVERNMENT_UFO_FILE_INVENTORY_v0.2.0.zip -d upstream/ledger
+          unzip -q upstream/text-outer/AUSTRALIA_PUBLIC_TEXT_ACCESS_v0.1.0.zip -d upstream/text
+          unzip -t upstream/ledger-outer/AUSTRALIA_GOVERNMENT_UFO_FILE_INVENTORY_v0.2.0.zip >/dev/null
+          unzip -t upstream/text-outer/AUSTRALIA_PUBLIC_TEXT_ACCESS_v0.1.0.zip >/dev/null
+      - name: Build source-neutral snapshot
+        run: python ufo_atlas/ingestion/australia/build_australia_source_snapshot_v1.py --ledger-dir upstream/ledger --text-dir upstream/text --output-dir snapshot
+      - name: Verify and package
+        run: |
+          python - <<'PY'
+          import json,sqlite3
+          s=json.load(open('snapshot/SUMMARY.json'))
+          assert s['status']=='PASS' and s['government_file_ledger_rows']==155 and s['text_access_copies']==21
+          con=sqlite3.connect('snapshot/AUSTRALIA_GOVERNMENT_UFO_SOURCE_SNAPSHOT_v0.3.0.sqlite')
+          assert con.execute('pragma integrity_check').fetchone()[0]=='ok'
+          assert not con.execute('pragma foreign_key_check').fetchall()
+          assert con.execute('select count(*) from source_file').fetchone()[0]==155
+          assert con.execute('select count(*) from text_access_copy').fetchone()[0]==21
+          assert con.execute('select count(*) from text_access_page').fetchone()[0]>0
+          con.close()
+          PY
+          (cd snapshot && zip -q -r ../AUSTRALIA_GOVERNMENT_UFO_SOURCE_SNAPSHOT_v0.3.0.zip .)
+          sha256sum AUSTRALIA_GOVERNMENT_UFO_SOURCE_SNAPSHOT_v0.3.0.zip > AUSTRALIA_GOVERNMENT_UFO_SOURCE_SNAPSHOT_v0.3.0.zip.sha256
+          unzip -t AUSTRALIA_GOVERNMENT_UFO_SOURCE_SNAPSHOT_v0.3.0.zip >/dev/null
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AUSTRALIA_GOVERNMENT_UFO_SOURCE_SNAPSHOT_v0.3.0
+          path: |
+            AUSTRALIA_GOVERNMENT_UFO_SOURCE_SNAPSHOT_v0.3.0.zip
+            AUSTRALIA_GOVERNMENT_UFO_SOURCE_SNAPSHOT_v0.3.0.zip.sha256
+            snapshot/SUMMARY.json
+          retention-days: 90
+          compression-level: 0
+          if-no-files-found: error
