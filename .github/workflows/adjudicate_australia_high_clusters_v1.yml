@@ -1,0 +1,75 @@
+name: Adjudicate Australia high-priority UFO source clusters v1
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ufo_atlas/ingestion/australia/adjudicate_high_clusters_v1.py
+      - .github/workflows/adjudicate_australia_high_clusters_v1.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: australia-ufo-high-cluster-adjudication-v1
+  cancel-in-progress: false
+
+jobs:
+  adjudicate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      INPUT_ARTIFACT_ID: '9972079377'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - name: Download exact verified v0.2.0 predecessor
+        run: |
+          set -euo pipefail
+          mkdir -p predecessor-outer predecessor
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$INPUT_ARTIFACT_ID/zip" > predecessor-artifact.zip
+          unzip -q predecessor-artifact.zip -d predecessor-outer
+          unzip -q predecessor-outer/AUSTRALIA_UFO_IMPORT_MODULE_v0.2.0.zip -d predecessor
+          unzip -t predecessor-outer/AUSTRALIA_UFO_IMPORT_MODULE_v0.2.0.zip >/dev/null
+      - name: Adjudicate all high-priority unresolved clusters
+        run: python ufo_atlas/ingestion/australia/adjudicate_high_clusters_v1.py --input-dir predecessor --output-dir module21
+      - name: Verify v0.2.1
+        run: |
+          python - <<'PY'
+          import json,sqlite3
+          s=json.load(open('module21/SUMMARY.json'))
+          assert s['status']=='PASS'
+          assert s['high_priority_clusters_adjudicated']==46
+          assert s['promoted_new_case_candidates']==17
+          assert s['total_case_candidates']==158
+          assert s['remaining_unresolved_high_priority_clusters']==0
+          assert s['remaining_unresolved_medium_low_clusters']==92
+          assert s['official_provenance_links']==156
+          con=sqlite3.connect('module21/AUSTRALIA_UFO_IMPORT_MODULE_v0.2.1.sqlite')
+          assert con.execute('pragma integrity_check').fetchone()[0]=='ok'
+          assert not con.execute('pragma foreign_key_check').fetchall()
+          assert con.execute('select count(*) from cluster_adjudication').fetchone()[0]==46
+          assert con.execute("select count(*) from case_candidate where extraction_method='HIGH_CLUSTER_SOURCE_ADJUDICATION'").fetchone()[0]==17
+          assert con.execute("select count(*) from event_cluster where cluster_status='UNRESOLVED_CASE_BOUNDARY' and priority='HIGH'").fetchone()[0]==0
+          con.close()
+          PY
+          (cd module21 && zip -q -r ../AUSTRALIA_UFO_IMPORT_MODULE_v0.2.1.zip .)
+          sha256sum AUSTRALIA_UFO_IMPORT_MODULE_v0.2.1.zip > AUSTRALIA_UFO_IMPORT_MODULE_v0.2.1.zip.sha256
+          unzip -t AUSTRALIA_UFO_IMPORT_MODULE_v0.2.1.zip >/dev/null
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AUSTRALIA_UFO_IMPORT_MODULE_v0.2.1
+          path: |
+            AUSTRALIA_UFO_IMPORT_MODULE_v0.2.1.zip
+            AUSTRALIA_UFO_IMPORT_MODULE_v0.2.1.zip.sha256
+            module21/SUMMARY.json
+            module21/CLUSTER_ADJUDICATION.csv
+            module21/PROMOTED_CASES.csv
+            module21/REMAINING_UNRESOLVED_CLUSTERS.csv
+          retention-days: 90
+          compression-level: 0
+          if-no-files-found: error
