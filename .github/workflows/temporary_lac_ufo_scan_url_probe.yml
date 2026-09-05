@@ -1,4 +1,4 @@
-name: Temporary LAC UFO scan URL probe
+name: Temporary LAC UFO unresolved scan recovery probe
 
 on:
   push:
@@ -11,47 +11,99 @@ permissions:
 jobs:
   probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
-      - name: Fetch representative item and image pages
+      - name: Probe unresolved LAC portal and scan routes
         run: |
           set -euo pipefail
-          python -m pip install --quiet beautifulsoup4
+          python -m pip install --quiet requests beautifulsoup4 pillow
           mkdir -p export
-          urls=(
-            'https://www.collectionscanada.gc.ca/databases/ufo/001057-119.01-e.php?isn_id_nbr=13019&page_id_nbr=4382&record_id=13019-4382-12906&interval=50'
-            'https://www.collectionscanada.gc.ca/databases/ufo/001057-119.02-e.php?isn_id_nbr=13019&page_id_nbr=4382&record_id=13019-4382-12906&interval=50'
-            'https://www.collectionscanada.gc.ca/databases/ufo/001057-119.02-e.php?isn_id_nbr=13019&page_id_nbr=4378&record_id=13019-4378-0&interval=50'
-          )
-          i=0
-          for url in "${urls[@]}"; do
-            i=$((i+1))
-            curl --fail --location --retry 3 --user-agent 'Mozilla/5.0' "$url" -o "export/page_${i}.html"
-          done
           python - <<'PY'
+          from __future__ import annotations
+          import hashlib, json, re, urllib.parse
           from pathlib import Path
+          import requests
           from bs4 import BeautifulSoup
-          import json, re
-          out=[]
-          for p in sorted(Path('export').glob('page_*.html')):
-              raw=p.read_bytes(); text=raw.decode('latin-1',errors='replace')
-              soup=BeautifulSoup(text,'html.parser')
-              imgs=[]
-              for tag in soup.find_all('img'):
-                  imgs.append({'src':tag.get('src'),'alt':tag.get('alt'),'width':tag.get('width'),'height':tag.get('height')})
-              links=[]
-              for tag in soup.find_all('a',href=True):
-                  href=tag.get('href'); label=' '.join(tag.get_text(' ',strip=True).split())
-                  if any(x in (href or '').lower() for x in ['jpg','jpeg','gif','tif','tiff','pdf','001057','image','pic']):
-                      links.append({'href':href,'label':label})
-              urlish=sorted(set(re.findall(r'https?://[^\s\"\'<>]+|[^\s\"\'<>]+\.(?:jpg|jpeg|gif|png|tif|tiff|pdf)(?:\?[^\s\"\'<>]*)?',text,re.I)))
-              out.append({'file':p.name,'bytes':len(raw),'title':soup.title.get_text(' ',strip=True) if soup.title else None,'images':imgs,'links':links,'urlish':urlish[:100],'text_excerpt':' '.join(soup.get_text(' ',strip=True).split())[:3000]})
-          Path('export/probe.json').write_text(json.dumps(out,indent=2,ensure_ascii=False),encoding='utf-8')
-          print(json.dumps(out,indent=2,ensure_ascii=False))
+          from PIL import Image
+          from io import BytesIO
+
+          records = [
+              {'portal_record_id':'4670-0-0','isn':'4670','page':'','record':'4670-0-0'},
+              {'portal_record_id':'37024-8737-6622','isn':'37024','page':'8737','record':'37024-8737-6622'},
+              {'portal_record_id':'37024-9370-6999','isn':'37024','page':'9370','record':'37024-9370-6999'},
+              {'portal_record_id':'4669-184-0','isn':'4669','page':'184','record':'4669-184-0'},
+              {'portal_record_id':'4708-2499-0','isn':'4708','page':'2499','record':'4708-2499-0'},
+          ]
+          base='https://www.collectionscanada.gc.ca/databases/ufo/'
+          session=requests.Session(); session.headers.update({'User-Agent':'Mozilla/5.0 (compatible; WatchersProject-UFOAtlas/1.0; archival research)'})
+
+          def fetch(url, timeout=30):
+              try:
+                  r=session.get(url,timeout=timeout,allow_redirects=True)
+                  return {'ok':r.ok,'status_code':r.status_code,'final_url':r.url,'content_type':r.headers.get('content-type',''),'bytes':len(r.content),'sha256':hashlib.sha256(r.content).hexdigest(),'content':r.content}
+              except Exception as exc:
+                  return {'ok':False,'status_code':None,'final_url':url,'content_type':'','bytes':0,'sha256':'','error':repr(exc),'content':b''}
+
+          results=[]
+          for item in records:
+              query={'isn_id_nbr':item['isn'],'record_id':item['record'],'interval':'50'}
+              if item['page']!='': query['page_id_nbr']=item['page']
+              item_url=base+'001057-119.01-e.php?'+urllib.parse.urlencode(query)
+              image_url=base+'001057-119.02-e.php?'+urllib.parse.urlencode(query)
+              item_fetch=fetch(item_url)
+              image_fetch=fetch(image_url)
+              Path(f"export/{item['portal_record_id']}_item.html").write_bytes(item_fetch.pop('content'))
+              image_html=image_fetch.pop('content')
+              Path(f"export/{item['portal_record_id']}_image.html").write_bytes(image_html)
+              html=image_html.decode('latin-1',errors='replace')
+              soup=BeautifulSoup(html,'html.parser')
+              found=[]
+              for tag in soup.find_all(['img','a']):
+                  attr='src' if tag.name=='img' else 'href'
+                  raw=tag.get(attr)
+                  if not raw: continue
+                  url=urllib.parse.urljoin(image_url,raw).replace('&amp;','&')
+                  if 'data2.collectionscanada.gc.ca' in url or re.search(r'\.(?:jpe?g|png|tiff?|gif)(?:$|\?)',url,re.I):
+                      found.append(url)
+              found += re.findall(r'https?://data2\.collectionscanada\.gc\.ca/[^\"\'<>\s]+',html,re.I)
+              found=list(dict.fromkeys(u.rstrip(').,;') for u in found))
+              tested=[]
+              for direct in found:
+                  candidates=[direct]
+                  parsed=urllib.parse.urlparse(direct)
+                  stem=re.sub(r'\.(?:jpe?g|png|tiff?|gif)$','',parsed.path,flags=re.I)
+                  for ext in ['.jpg','.JPG','.jpeg','.tif','.tiff','.png','.gif']:
+                      candidates.append(urllib.parse.urlunparse((parsed.scheme or 'https',parsed.netloc,stem+ext,'','','')))
+                  m=re.search(r'(\d+)(\.[A-Za-z]+)$',parsed.path)
+                  if m:
+                      number=int(m.group(1)); prefix=parsed.path[:m.start(1)]; ext=m.group(2)
+                      for delta in [-2,-1,1,2]:
+                          candidates.append(urllib.parse.urlunparse((parsed.scheme or 'https',parsed.netloc,f'{prefix}{number+delta:0{len(m.group(1))}d}{ext}','','','')))
+                  for candidate in dict.fromkeys(candidates):
+                      probe=fetch(candidate,20)
+                      data=probe.pop('content')
+                      probe['url']=candidate
+                      if probe['ok'] and probe['bytes']>1000:
+                          try:
+                              with Image.open(BytesIO(data)) as im:
+                                  probe['image_width']=im.width; probe['image_height']=im.height; probe['image_format']=im.format
+                          except Exception as exc:
+                              probe['image_error']=repr(exc)
+                      tested.append(probe)
+              results.append({'record':item,'item_url':item_url,'image_url':image_url,'item_fetch':item_fetch,'image_fetch':image_fetch,'found_scan_urls':found,'tested_candidates':tested})
+          Path('export/UNRESOLVED_SCAN_PROBE.json').write_text(json.dumps(results,indent=2,ensure_ascii=False),encoding='utf-8')
+          summary=[]
+          for r in results:
+              viable=[x for x in r['tested_candidates'] if x.get('ok') and x.get('bytes',0)>1000 and x.get('image_width')]
+              summary.append({'portal_record_id':r['record']['portal_record_id'],'item_status':r['item_fetch']['status_code'],'image_page_status':r['image_fetch']['status_code'],'scan_urls_found':len(r['found_scan_urls']),'viable_image_candidates':len(viable),'viable_urls':[x['url'] for x in viable]})
+          Path('export/UNRESOLVED_SCAN_PROBE_SUMMARY.json').write_text(json.dumps(summary,indent=2),encoding='utf-8')
+          print(json.dumps(summary,indent=2))
           PY
-      - name: Upload probe
+          sha256sum export/* > export/SHA256SUMS.txt
+      - name: Upload unresolved scan probe
         uses: actions/upload-artifact@v4
         with:
-          name: lac-ufo-scan-url-probe
+          name: lac-ufo-unresolved-scan-probe
           path: export/
-          retention-days: 1
+          if-no-files-found: error
+          retention-days: 2
