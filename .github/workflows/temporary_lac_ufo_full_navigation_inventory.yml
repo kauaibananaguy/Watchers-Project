@@ -1,0 +1,147 @@
+name: Temporary LAC UFO full scan navigation inventory
+
+on:
+  push:
+    paths:
+      - '.github/workflows/temporary_lac_ufo_full_navigation_inventory.yml'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  inventory:
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        chunk: [0, 1, 2, 3, 4, 5, 6, 7]
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Download LAC metadata union
+        uses: actions/download-artifact@v4
+        with:
+          name: lac-ufo-complete-metadata-union
+          path: metadata
+          github-token: ${{ github.token }}
+          repository: kauaibananaguy/Watchers-Project
+          run-id: 33924142848
+      - name: Follow every source-file image navigation chain
+        env:
+          CHUNK: ${{ matrix.chunk }}
+          CHUNK_COUNT: 8
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet requests beautifulsoup4
+          mkdir -p output
+          cat > /tmp/inventory.py <<'PY'
+          from __future__ import annotations
+          import csv, hashlib, json, os, re, time, urllib.parse
+          from collections import defaultdict
+          from datetime import datetime, timezone
+          from pathlib import Path
+          import requests
+          from bs4 import BeautifulSoup
+
+          CHUNK=int(os.environ['CHUNK']);CHUNK_COUNT=int(os.environ['CHUNK_COUNT'])
+          source_csv=next(Path('metadata').rglob('LAC_UFO_SOURCE_INDEX.csv'))
+          with source_csv.open('r',encoding='utf-8-sig',newline='') as f: rows=list(csv.DictReader(f))
+          by_isn=defaultdict(list)
+          for r in rows:
+              if r.get('isn_id_nbr') and r.get('page_id_nbr','').isdigit(): by_isn[r['isn_id_nbr']].append(r)
+          selected=[(isn,members) for isn,members in by_isn.items() if int(isn)%CHUNK_COUNT==CHUNK]
+          selected.sort(key=lambda x:int(x[0]))
+          session=requests.Session();session.headers.update({'User-Agent':'Mozilla/5.0 (compatible; WatchersProject-UFOAtlas/1.0; archival research)'})
+          def get(url):
+              last=None
+              for n in range(7):
+                  try:
+                      r=session.get(url,timeout=60,allow_redirects=True);r.raise_for_status();return r
+                  except Exception as e:
+                      last=e;time.sleep(min(10,1+n))
+              raise RuntimeError(f'{url}: {last}')
+          def parse(url):
+              r=get(url);text=r.content.decode('latin-1',errors='replace');soup=BeautifulSoup(text,'html.parser')
+              nav={}
+              for a in soup.find_all('a',href=True):
+                  label=' '.join(a.get_text(' ',strip=True).split())
+                  if label in {'<<','<','>','>>'}:
+                      nav[label]=urllib.parse.urljoin(r.url,a['href'])
+              direct=''
+              for img in soup.find_all('img',src=True):
+                  c=urllib.parse.urljoin(r.url,img['src'])
+                  if 'data2.collectionscanada.gc.ca' in c:
+                      direct=c.replace('http://','https://',1);break
+              q=urllib.parse.parse_qs(urllib.parse.urlparse(r.url).query)
+              page=(q.get('page_id_nbr') or [''])[0]
+              if not page:
+                  # Some redirects omit the page parameter; use the self-navigation link.
+                  self_links=[u for label,u in nav.items() if label not in {'<<','<','>','>>'}]
+              return r,nav,direct,page
+          output=[];errors=[]
+          for ordinal,(isn,members) in enumerate(selected,1):
+              members=sorted(members,key=lambda r:int(r['source_sequence']))
+              rep=members[0]
+              try:
+                  _,nav,_,_=parse(rep['image_view_url'])
+                  start_url=nav.get('<<') or rep['image_view_url']
+                  current=start_url;seen_urls=set();seen_pages=set();sequence=0
+                  while current and current not in seen_urls:
+                      seen_urls.add(current)
+                      response,nav,direct,page=parse(current)
+                      q=urllib.parse.parse_qs(urllib.parse.urlparse(response.url).query)
+                      page=(q.get('page_id_nbr') or [page or ''])[0]
+                      if not page or not page.isdigit():
+                          # Extract from any current-page numeric label link if URL lost it.
+                          for a in BeautifulSoup(response.content.decode('latin-1',errors='replace'),'html.parser').find_all('a',href=True):
+                              label=' '.join(a.get_text(' ',strip=True).split())
+                              if label.isdigit():
+                                  qq=urllib.parse.parse_qs(urllib.parse.urlparse(urllib.parse.urljoin(response.url,a['href'])).query)
+                                  p=(qq.get('page_id_nbr') or [''])[0]
+                                  if p.isdigit(): page=p;break
+                      if not page or not page.isdigit(): raise RuntimeError('Unable to resolve current page identifier')
+                      if page in seen_pages: break
+                      seen_pages.add(page);sequence+=1
+                      output.append({
+                          'inventory_chunk':CHUNK,'isn_id_nbr':isn,'source_file_sequence':sequence,'page_id_nbr':page,
+                          'representative_portal_record_id':rep['portal_record_id'],'record_group':rep['record_group'],
+                          'document_title':rep['document_title'],'image_page_url':response.url,'direct_scan_url':direct,
+                          'image_page_sha256':hashlib.sha256(response.content).hexdigest(),
+                          'indexed_in_portal_metadata':1 if any(x.get('page_id_nbr')==page for x in members) else 0,
+                          'indexed_portal_record_ids':' | '.join(x['portal_record_id'] for x in members if x.get('page_id_nbr')==page),
+                          'next_image_page_url':nav.get('>',''),'previous_image_page_url':nav.get('<',''),
+                          'inventoried_at':datetime.now(timezone.utc).isoformat(),
+                      })
+                      nxt=nav.get('>')
+                      if not nxt or nxt==current: break
+                      current=nxt
+                  if not seen_pages: raise RuntimeError('No pages discovered')
+                  print(f'chunk {CHUNK}: {ordinal}/{len(selected)} ISN {isn}, pages={len(seen_pages)}',flush=True)
+              except Exception as e:
+                  errors.append({'isn_id_nbr':isn,'representative_portal_record_id':rep['portal_record_id'],'error':repr(e)})
+                  print(f'chunk {CHUNK}: ISN {isn} ERROR {e!r}',flush=True)
+          output.sort(key=lambda r:(int(r['isn_id_nbr']),int(r['source_file_sequence'])))
+          fields=list(output[0].keys()) if output else ['inventory_chunk']
+          with open(f'output/LAC_SCAN_NAVIGATION_INVENTORY_CHUNK_{CHUNK:02d}.csv','w',encoding='utf-8-sig',newline='') as f:
+              w=csv.DictWriter(f,fieldnames=fields);w.writeheader();w.writerows(output)
+          report={
+              'chunk':CHUNK,'source_files_selected':len(selected),'source_files_completed':len(selected)-len(errors),
+              'source_files_failed':len(errors),'physical_scan_pages_inventoried':len(output),
+              'indexed_scan_pages':sum(int(r['indexed_in_portal_metadata']) for r in output),
+              'unindexed_scan_pages':sum(not int(r['indexed_in_portal_metadata']) for r in output),
+              'errors':errors,'status':'PASS' if not errors else 'PARTIAL',
+          }
+          Path(f'output/LAC_SCAN_NAVIGATION_REPORT_CHUNK_{CHUNK:02d}.json').write_text(json.dumps(report,indent=2),encoding='utf-8')
+          print(json.dumps(report,indent=2),flush=True)
+          PY
+          python /tmp/inventory.py
+          sha256sum output/* > output/SHA256SUMS.txt
+      - name: Upload navigation inventory partition
+        uses: actions/upload-artifact@v4
+        with:
+          name: lac-ufo-navigation-inventory-${{ matrix.chunk }}
+          path: output/
+          if-no-files-found: error
+          compression-level: 9
+          retention-days: 3
