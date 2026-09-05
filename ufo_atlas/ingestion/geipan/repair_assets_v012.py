@@ -2,8 +2,8 @@
 """Repair non-downloaded GEIPAN linked assets and merge the results additively.
 
 All prior metadata is preserved. Only explicit non-DOWNLOADED assets are retried.
-Permanent HTTP absence is recorded as a terminal source state rather than being
-silently discarded. Transient failures remain blocking remands.
+Qualified source-availability results are recorded for the retrieval snapshot,
+not as permanent absence. Incomplete and transient failures remain blocking.
 """
 from __future__ import annotations
 
@@ -15,6 +15,8 @@ import shutil
 import sqlite3
 from pathlib import Path
 from typing import Any
+
+import asset_recovery_policy_v013 as policy
 
 
 TERMINAL_STATES = {
@@ -107,25 +109,7 @@ def plan(args: argparse.Namespace) -> None:
 
 
 def map_terminal_status(status: str, error: str | None) -> str:
-    if status == "DOWNLOADED":
-        return status
-    text = (error or "").lower()
-    if "http error 404" in text or "status code 404" in text:
-        return "SOURCE_NOT_AVAILABLE_404"
-    if "http error 403" in text or "status code 403" in text:
-        return "SOURCE_FORBIDDEN_403"
-    if "http error 410" in text or "status code 410" in text:
-        return "SOURCE_GONE_410"
-    if "source_malformed_link" in text:
-        return "SOURCE_MALFORMED_LINK"
-    if (
-        "source_host_unresolvable" in text
-        or "name or service not known" in text
-        or "temporary failure in name resolution" in text
-        or "nodename nor servname" in text
-    ):
-        return "SOURCE_HOST_UNRESOLVABLE"
-    return status
+    return policy.map_terminal_status(status, error)
 
 
 def merge(args: argparse.Namespace) -> dict[str, Any]:
@@ -327,7 +311,9 @@ def merge(args: argparse.Namespace) -> dict[str, Any]:
         "terminal_source_policy": (
             "Live URL variants and public archived captures are attempted before "
             "HTTP 403/404/410, malformed links, or unresolvable retired hosts are "
-            "retained as explicit source-unavailable states; other failures remain blocking."
+            "retained as explicit snapshot source-unavailable states only after complete "
+            "lookup evidence; transient DNS, rate limits, and unavailable archive "
+            "lookups remain blocking and are never permanent-absence conclusions."
         ),
     }
     (output_root / "REPAIR_SUMMARY.json").write_text(
