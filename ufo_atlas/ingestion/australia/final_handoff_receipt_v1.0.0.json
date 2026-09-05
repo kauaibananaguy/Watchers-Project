@@ -1,0 +1,35 @@
+{
+  "package": "AUSTRALIA_UFO_ATLAS_IMPORT_HANDOFF_v1.0.0.zip",
+  "status": "PASS_IMPORT_READY_SOURCE_MODULE",
+  "created_date": "2026-09-05",
+  "master_merge_performed": false,
+  "counts": {
+    "source_files": 155,
+    "searchable_source_pages": 2901,
+    "event_clusters": 243,
+    "cluster_adjudications": 243,
+    "unresolved_cluster_queue": 0,
+    "case_candidates": 190,
+    "new_cases_final_pass": 27,
+    "chronological_narratives": 190,
+    "source_case_references": 253,
+    "entity_candidates": 67,
+    "ufo_import_records": 419,
+    "ufo_import_relationships": 755,
+    "ufo_import_source_links": 571,
+    "duplicate_review_pairs": 5,
+    "provisional_ce_assignments": 1
+  },
+  "validation": {
+    "sqlite_integrity_check": "ok",
+    "foreign_key_violations": 0,
+    "zip_crc": "PASS",
+    "package_manifest_member_hashes": "PASS",
+    "sha256sums_member_hashes": "PASS"
+  },
+  "sha256": "9b2d82fada29d5ba9752364bb4edd7a8358ac5a6bdbfbd5cfb27ad18f73402f5",
+  "bytes": 5209167,
+  "classification_policy": "Source dispositions and administrative classifications are preserved as source metadata and are not mechanically mapped to CE classes. CE is event-derived only.",
+  "narrative_policy": "All 190 case candidates have readable source-reconstructed chronological narratives. Where OCR/source legibility is insufficient, the narrative explicitly limits itself rather than inventing missing event phases, while raw source text and exact page provenance remain preserved.",
+  "handoff_role": "Prepared Australia source module for the separate UFO Atlas master-integration session."
+}
