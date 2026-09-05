@@ -1,0 +1,239 @@
+name: Temporary LAC UFO extract complete text corpus
+
+on:
+  push:
+    paths:
+      - '.github/workflows/temporary_lac_ufo_extract_text_corpus.yml'
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  find_snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 130
+    outputs:
+      run_id: ${{ steps.find.outputs.run_id }}
+    steps:
+      - name: Wait for latest successful complete-source-snapshot run
+        id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 260); do
+            payload="$(gh api "repos/${REPO}/actions/workflows/temporary_lac_ufo_complete_source_snapshot.yml/runs?per_page=20")"
+            run_id="$(python -c 'import json,sys; d=json.load(sys.stdin); xs=[r for r in d.get("workflow_runs",[]) if r.get("status")=="completed" and r.get("conclusion")=="success"]; print(xs[0]["id"] if xs else "")' <<<"$payload")"
+            if [ -n "$run_id" ]; then
+              echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+              echo "Using successful source snapshot run $run_id"
+              exit 0
+            fi
+            latest="$(python -c 'import json,sys; d=json.load(sys.stdin); x=d.get("workflow_runs",[]); print((str(x[0].get("id"))+" "+str(x[0].get("status"))+" "+str(x[0].get("conclusion"))) if x else "none")' <<<"$payload")"
+            echo "Attempt ${attempt}: latest snapshot run ${latest}; waiting"
+            sleep 30
+          done
+          echo "No successful complete-source-snapshot run became available" >&2
+          exit 1
+
+  extract_text:
+    needs: find_snapshot
+    strategy:
+      fail-fast: false
+      max-parallel: 8
+      matrix:
+        chunk: [0, 1, 2, 3, 4, 5, 6, 7]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Download one complete source-snapshot partition
+        uses: actions/download-artifact@v4
+        with:
+          name: lac-ufo-complete-source-snapshot-${{ matrix.chunk }}
+          path: source
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ needs.find_snapshot.outputs.run_id }}
+      - name: Verify and retain only ledgers and OCR text
+        env:
+          CHUNK: ${{ matrix.chunk }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import csv,json,os,shutil
+          root=Path('source')
+          chunk=int(os.environ['CHUNK'])
+          ledgers=list(root.rglob(f'SOURCE_SCAN_LEDGER_CHUNK_{chunk:02d}.csv'))
+          contents=list(root.rglob(f'SCAN_CONTENT_CHUNK_{chunk:02d}.jsonl'))
+          reports=list(root.rglob(f'SOURCE_SCAN_SNAPSHOT_REPORT_CHUNK_{chunk:02d}.json'))
+          if len(ledgers)!=1 or len(contents)!=1 or len(reports)!=1:
+              raise SystemExit(f'Expected one ledger/content/report; got {len(ledgers)}/{len(contents)}/{len(reports)}')
+          report=json.loads(reports[0].read_text())
+          if report.get('unexpected_errors') not in (0,'0'):
+              raise SystemExit(f'Unexpected source-snapshot errors: {report}')
+          rows=list(csv.DictReader(ledgers[0].open(encoding='utf-8-sig',newline='')))
+          text_rows=[json.loads(line) for line in contents[0].open(encoding='utf-8') if line.strip()]
+          if len(rows)!=len(text_rows)!=int(report['physical_pages_selected']):
+              raise SystemExit('Partition row-count mismatch')
+          if len({(r['isn_id_nbr'],r['page_id_nbr']) for r in rows})!=len(rows):
+              raise SystemExit('Duplicate physical page in partition')
+          out=Path('text_output');out.mkdir()
+          shutil.copy2(ledgers[0],out/ledgers[0].name)
+          shutil.copy2(contents[0],out/contents[0].name)
+          shutil.copy2(reports[0],out/reports[0].name)
+          (out/f'PARTITION_VALIDATION_{chunk:02d}.json').write_text(json.dumps({
+              'chunk':chunk,
+              'source_snapshot_run_id':os.environ.get('SNAPSHOT_RUN_ID',''),
+              'physical_pages':len(rows),
+              'complete':sum(r.get('status')=='COMPLETE' for r in text_rows),
+              'source_404':sum(r.get('status')=='SOURCE_SCAN_UNAVAILABLE_HTTP_404' for r in text_rows),
+              'unexpected_errors':sum(r.get('status')=='ERROR' for r in text_rows),
+              'status':'PASS'
+          },indent=2))
+          PY
+          sha256sum text_output/* > text_output/SHA256SUMS.txt
+      - name: Upload text-only source partition
+        uses: actions/upload-artifact@v4
+        with:
+          name: lac-ufo-complete-source-text-${{ matrix.chunk }}
+          path: text_output/
+          if-no-files-found: error
+          compression-level: 9
+          retention-days: 4
+
+  consolidate:
+    needs: [find_snapshot, extract_text]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Download all text-only source partitions
+        uses: actions/download-artifact@v4
+        with:
+          pattern: lac-ufo-complete-source-text-*
+          path: parts
+          merge-multiple: true
+      - name: Download authoritative metadata union
+        uses: actions/download-artifact@v4
+        with:
+          name: lac-ufo-complete-metadata-union
+          path: metadata
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: 33924142848
+      - name: Consolidate and validate complete source text corpus
+        env:
+          SNAPSHOT_RUN_ID: ${{ needs.find_snapshot.outputs.run_id }}
+        run: |
+          set -euo pipefail
+          mkdir -p corpus
+          python - <<'PY'
+          from pathlib import Path
+          import csv,hashlib,json,os,shutil
+          parts=Path('parts');corpus=Path('corpus')
+          ledgers=sorted(parts.rglob('SOURCE_SCAN_LEDGER_CHUNK_*.csv'))
+          contents=sorted(parts.rglob('SCAN_CONTENT_CHUNK_*.jsonl'))
+          reports=sorted(parts.rglob('SOURCE_SCAN_SNAPSHOT_REPORT_CHUNK_*.json'))
+          if not (len(ledgers)==len(contents)==len(reports)==8):
+              raise SystemExit(f'Expected 8 ledgers, 8 content files, 8 reports; got {len(ledgers)}, {len(contents)}, {len(reports)}')
+          ledger_rows=[];content_rows=[];report_rows=[]
+          for p in ledgers:
+              ledger_rows.extend(csv.DictReader(p.open(encoding='utf-8-sig',newline='')))
+          for p in contents:
+              content_rows.extend(json.loads(line) for line in p.open(encoding='utf-8') if line.strip())
+          for p in reports:
+              report_rows.append(json.loads(p.read_text()))
+          keys=[(r['isn_id_nbr'],r['page_id_nbr']) for r in ledger_rows]
+          content_keys=[(str(r['isn_id_nbr']),str(r['page_id_nbr'])) for r in content_rows]
+          if len(keys)!=len(set(keys)):
+              raise SystemExit('Duplicate physical page keys in consolidated scan ledger')
+          if set(keys)!=set(content_keys):
+              raise SystemExit('Ledger/content physical-page key mismatch')
+          unexpected=sum(int(r.get('unexpected_errors',0)) for r in report_rows)
+          if unexpected:
+              raise SystemExit(f'Unexpected errors across source snapshots: {unexpected}')
+          ledger_rows.sort(key=lambda r:(int(r['isn_id_nbr']),int(r['source_file_sequence'])))
+          content_rows.sort(key=lambda r:(int(r['isn_id_nbr']),int(r['source_file_sequence'])))
+          fields=list(ledger_rows[0])
+          with (corpus/'LAC_COMPLETE_SOURCE_SCAN_LEDGER.csv').open('w',encoding='utf-8-sig',newline='') as f:
+              w=csv.DictWriter(f,fieldnames=fields);w.writeheader();w.writerows(ledger_rows)
+          with (corpus/'LAC_COMPLETE_SOURCE_CONTENT.jsonl').open('w',encoding='utf-8') as f:
+              for row in content_rows:
+                  f.write(json.dumps(row,ensure_ascii=False,sort_keys=True)+'\n')
+          metadata_source=next(Path('metadata').rglob('LAC_UFO_SOURCE_INDEX.csv'))
+          shutil.copy2(metadata_source,corpus/'LAC_UFO_SOURCE_INDEX.csv')
+          for optional in ['LAC_UFO_SOURCE_INDEX.json','ACQUISITION_SUMMARY.json','DOCUMENT_TITLE_COUNTS.csv','QUERY_COMPLETION_LEDGER.csv','SOURCE_FIELD_MAPPING.csv']:
+              matches=list(Path('metadata').rglob(optional))
+              if matches: shutil.copy2(matches[0],corpus/optional)
+          summary={
+              'status':'PASS',
+              'source_snapshot_run_id':int(os.environ['SNAPSHOT_RUN_ID']),
+              'metadata_union_run_id':33924142848,
+              'physical_scan_pages_inventoried':len(ledger_rows),
+              'complete_scan_snapshots':sum(r.get('status')=='COMPLETE' for r in content_rows),
+              'source_scan_unavailable_http_404':sum(r.get('status')=='SOURCE_SCAN_UNAVAILABLE_HTTP_404' for r in content_rows),
+              'unexpected_errors':sum(r.get('status')=='ERROR' for r in content_rows),
+              'indexed_ocr_reused':sum(r.get('ocr_origin')=='REUSED_VERIFIED_INDEXED_OCR' for r in content_rows),
+              'unindexed_pages_newly_ocrd':sum(r.get('ocr_origin')=='NEW_OCR_FOR_UNINDEXED_PHYSICAL_PAGE' for r in content_rows),
+              'ocr_characters_total':sum(int(r.get('ocr_characters') or 0) for r in content_rows),
+              'unique_source_files':len({r['isn_id_nbr'] for r in ledger_rows}),
+              'portal_source_records':sum(1 for _ in csv.DictReader(metadata_source.open(encoding='utf-8-sig',newline=''))),
+          }
+          (corpus/'LAC_COMPLETE_SOURCE_CORPUS_SUMMARY.json').write_text(json.dumps(summary,indent=2),encoding='utf-8')
+          def sha(p):
+              h=hashlib.sha256()
+              with p.open('rb') as f:
+                  for c in iter(lambda:f.read(1024*1024),b''):h.update(c)
+              return h.hexdigest()
+          files=[]
+          for p in sorted(corpus.iterdir()):
+              if p.is_file() and p.name!='manifest.json':files.append({'path':p.name,'size_bytes':p.stat().st_size,'sha256':sha(p)})
+          (corpus/'manifest.json').write_text(json.dumps({'files':files},indent=2),encoding='utf-8')
+          print(json.dumps(summary,indent=2))
+          PY
+          (cd corpus && zip -9 -q ../LAC_UFO_COMPLETE_SOURCE_TEXT_CORPUS.zip *)
+          split -b 70m -d -a 3 LAC_UFO_COMPLETE_SOURCE_TEXT_CORPUS.zip LAC_UFO_COMPLETE_SOURCE_TEXT_CORPUS.zip.part-
+          sha256sum LAC_UFO_COMPLETE_SOURCE_TEXT_CORPUS.zip LAC_UFO_COMPLETE_SOURCE_TEXT_CORPUS.zip.part-* > LAC_UFO_COMPLETE_SOURCE_TEXT_CORPUS.sha256
+      - name: Commit recoverable text corpus parts and control summary
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          target='tmp/lac_ufo_complete_source_text_corpus'
+          rm -rf "$target"
+          mkdir -p "$target"
+          cp LAC_UFO_COMPLETE_SOURCE_TEXT_CORPUS.zip.part-* "$target/"
+          cp LAC_UFO_COMPLETE_SOURCE_TEXT_CORPUS.sha256 "$target/"
+          cp corpus/LAC_COMPLETE_SOURCE_CORPUS_SUMMARY.json "$target/"
+          cp corpus/manifest.json "$target/"
+          cat > "$target/README.md" <<EOF
+          # Temporary LAC UFO complete source text corpus
+
+          This directory contains split parts of the consolidated OCR/source-text corpus generated from source-snapshot run ${SNAPSHOT_RUN_ID}. Reassemble with:
+
+          \`cat LAC_UFO_COMPLETE_SOURCE_TEXT_CORPUS.zip.part-* > LAC_UFO_COMPLETE_SOURCE_TEXT_CORPUS.zip\`
+
+          Verify hashes against \`LAC_UFO_COMPLETE_SOURCE_TEXT_CORPUS.sha256\`. This is acquisition material for the one central UFO Atlas database, not a release or separate public database.
+          EOF
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add "$target"
+          git commit -m 'Store temporary LAC complete source text corpus' || true
+          git pull --rebase origin main
+          git push origin HEAD:main
+      - name: Upload consolidated source text corpus
+        uses: actions/upload-artifact@v4
+        with:
+          name: lac-ufo-complete-source-text-corpus
+          path: |
+            LAC_UFO_COMPLETE_SOURCE_TEXT_CORPUS.zip
+            LAC_UFO_COMPLETE_SOURCE_TEXT_CORPUS.sha256
+            corpus/LAC_COMPLETE_SOURCE_CORPUS_SUMMARY.json
+            corpus/manifest.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 4
