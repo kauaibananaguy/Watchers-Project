@@ -1,0 +1,73 @@
+name: Split Australia Boianai multi-event source block v1
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ufo_atlas/ingestion/australia/split_boianai_cases_v1.py
+      - .github/workflows/split_australia_boianai_cases_v1.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: australia-ufo-boianai-split-v1
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      INPUT_ARTIFACT_ID: '9972195612'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - name: Download exact verified v0.2.1 predecessor
+        run: |
+          set -euo pipefail
+          mkdir -p predecessor-outer predecessor
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$INPUT_ARTIFACT_ID/zip" > predecessor-artifact.zip
+          unzip -q predecessor-artifact.zip -d predecessor-outer
+          unzip -q predecessor-outer/AUSTRALIA_UFO_IMPORT_MODULE_v0.2.1.zip -d predecessor
+          unzip -t predecessor-outer/AUSTRALIA_UFO_IMPORT_MODULE_v0.2.1.zip >/dev/null
+      - name: Split Boianai source material into distinct chronological events
+        run: python ufo_atlas/ingestion/australia/split_boianai_cases_v1.py --input-dir predecessor --output-dir module22
+      - name: Verify v0.2.2
+        run: |
+          python - <<'PY'
+          import json,sqlite3
+          s=json.load(open('module22/SUMMARY.json'))
+          assert s['status']=='PASS'
+          assert s['new_boianai_split_cases']==5
+          assert s['total_case_candidates']==163
+          assert s['source_reconstructed_chronological_narratives']==5
+          assert s['manual_chronology_facts']==43
+          assert s['official_provenance_links']==161
+          assert s['ce_classes_assigned']==0
+          con=sqlite3.connect('module22/AUSTRALIA_UFO_IMPORT_MODULE_v0.2.2.sqlite')
+          assert con.execute('pragma integrity_check').fetchone()[0]=='ok'
+          assert not con.execute('pragma foreign_key_check').fetchall()
+          assert con.execute("select count(*) from case_candidate where extraction_method='MANUAL_MULTI_EVENT_SPLIT'").fetchone()[0]==5
+          assert con.execute('select count(*) from case_chronological_narrative').fetchone()[0]==5
+          con.close()
+          PY
+          (cd module22 && zip -q -r ../AUSTRALIA_UFO_IMPORT_MODULE_v0.2.2.zip .)
+          sha256sum AUSTRALIA_UFO_IMPORT_MODULE_v0.2.2.zip > AUSTRALIA_UFO_IMPORT_MODULE_v0.2.2.zip.sha256
+          unzip -t AUSTRALIA_UFO_IMPORT_MODULE_v0.2.2.zip >/dev/null
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AUSTRALIA_UFO_IMPORT_MODULE_v0.2.2
+          path: |
+            AUSTRALIA_UFO_IMPORT_MODULE_v0.2.2.zip
+            AUSTRALIA_UFO_IMPORT_MODULE_v0.2.2.zip.sha256
+            module22/SUMMARY.json
+            module22/BOIANAI_CASES.csv
+            module22/BOIANAI_NARRATIVES.csv
+          retention-days: 90
+          compression-level: 0
+          if-no-files-found: error
