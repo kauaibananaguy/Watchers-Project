@@ -1,0 +1,48 @@
+{
+  "project": "Watchers Project UFO Atlas",
+  "pass": "Pass 2 database upgrades",
+  "scope": "Project Blue Book CE1-CE5 encounter-class normalization",
+  "completion_date_hst": "2026-09-06",
+  "source_case_count": 10807,
+  "pass2_case_count": 10807,
+  "source_primary_ce_census": {
+    "CE1": 6435,
+    "CE2": 510,
+    "CE3": 664,
+    "RADAR_VISUAL": 1128,
+    "UNCLASSIFIED": 2070
+  },
+  "pass2_primary_ce_census": {
+    "CE1": 10758,
+    "CE2": 34,
+    "CE3": 14,
+    "CE4": 0,
+    "CE5": 1
+  },
+  "classification_policy": "Highest applicable public encounter class wins. CE1-CE5 describes reported encounter content and does not assert that the report is true or unexplained. Project Blue Book source classifications are preserved separately in provenance.",
+  "multi_report_policy": "Conservative primary-incident attribution: unrelated secondary clippings or reports inside a source file do not promote the primary incident to a higher CE class.",
+  "semantic_review": "Reviewed positive CE2/CE3/CE5 anchors plus explicit false-positive and multi-report contamination traps before database rebuild.",
+  "validation": {
+    "status": "PASS",
+    "sqlite_integrity": "ok",
+    "foreign_key_violations": 0,
+    "provenance_row_count": 10807,
+    "invalid_public_ce_values": 0,
+    "reviewed_positive_counts": {
+      "CE2": 34,
+      "CE3": 14,
+      "CE4": 0,
+      "CE5": 1
+    },
+    "reviewed_false_positive_ce1_count": 17
+  },
+  "source_database_sha256": "5edd47db7ed0ec4ea6424b23920e05b24f8f0f253d38417ec4d6ffa750858a2c",
+  "pass2_database_sha256": "0b996166fca9104b6092168360e07cc1c8d25ece186b33552251ab816e711466",
+  "inner_package_filename": "UFO_ATLAS_PROJECT_BLUE_BOOK_PASS2_v0.2.0.zip",
+  "inner_package_sha256": "412ea49cc293e510f85d788af10180a0b9c7da385471841227a4575469d502df",
+  "github_actions_run_id": 34074078303,
+  "github_actions_artifact_id": 10001462276,
+  "github_actions_artifact_name": "UFO_ATLAS_PROJECT_BLUE_BOOK_PASS2_v0.2.0_REVIEWED_COMPLETE",
+  "github_actions_artifact_sha256": "5658dff48b507f659330ed32e9f6c503a917117bf7c71b55a1bfb5a985a098d4",
+  "status": "COMPLETE"
+}

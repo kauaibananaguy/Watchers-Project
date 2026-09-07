@@ -1,0 +1,107 @@
+name: UFO Atlas Pass 2 — Project Blue Book CE1-CE5
+
+on:
+  push:
+    branches:
+      - ufo-atlas-pass2-blue-book-ce
+    paths:
+      - 'ufo_atlas/ingestion/project_blue_book/pass2/**'
+      - '.github/workflows/pass2_project_blue_book_ce.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: ufo-atlas-pass2-project-blue-book-ce
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and validate reviewed Project Blue Book Pass 2 database
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Download verified Project Blue Book central-import source artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p source_outer source
+          curl -fL \
+            -H 'Accept: application/vnd.github+json' \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            'https://api.github.com/repos/kauaibananaguy/Watchers-Project/actions/artifacts/9898029940/zip' \
+            -o source_artifact.zip
+          unzip -q source_artifact.zip -d source_outer
+          INNER=$(find source_outer -type f -name 'UFO_ATLAS_CENTRAL_IMPORT_PROJECT_BLUE_BOOK_v0.1.0.zip' -print -quit)
+          test -n "$INNER"
+          unzip -q "$INNER" -d source
+          DB=$(find source -type f -name 'UFO_ATLAS_CENTRAL_IMPORT_PROJECT_BLUE_BOOK_v0.1.0.sqlite' -print -quit)
+          test -n "$DB"
+          echo "SOURCE_DB=$DB" >> "$GITHUB_ENV"
+
+      - name: Build Pass 2 successor database
+        run: |
+          python ufo_atlas/ingestion/project_blue_book/pass2/build_blue_book_ce_pass2.py \
+            --source-db "$SOURCE_DB" \
+            --out-dir release
+
+      - name: Independent validation
+        run: |
+          python - <<'PY'
+          import json, pathlib, sqlite3
+          p=pathlib.Path('release/VALIDATION_REPORT.json')
+          r=json.loads(p.read_text())
+          assert r['status']=='PASS', r
+          assert r['source_case_count']==10807, r
+          assert r['pass2_case_count']==10807, r
+          assert r['provenance_row_count']==10807, r
+          assert r['foreign_key_violations']==0, r
+          assert r['invalid_public_ce_values']==0, r
+          db='release/UFO_ATLAS_PROJECT_BLUE_BOOK_PASS2_v0.2.0.sqlite'
+          con=sqlite3.connect(db)
+          vals={x[0] for x in con.execute('select distinct primary_ce from case_incidents')}
+          assert vals <= {'CE1','CE2','CE3','CE4','CE5'}, vals
+          assert con.execute('pragma integrity_check').fetchone()[0]=='ok'
+          assert not con.execute('pragma foreign_key_check').fetchall()
+          # Positive semantic review anchors.
+          anchors={
+            'IMPORT-PBB-NAID-6787898-CASE':'CE5',
+            'IMPORT-PBB-NAID-6977589-CASE':'CE3',
+            'IMPORT-PBB-NAID-8699462-CASE':'CE3',
+            'IMPORT-PBB-NAID-8770315-CASE':'CE2',
+            'IMPORT-PBB-NAID-9739156-CASE':'CE2',
+            'IMPORT-PBB-NAID-9669372-CASE':'CE2',
+          }
+          for rid,want in anchors.items():
+              got=con.execute('select primary_ce from case_incidents where record_id=?',(rid,)).fetchone()[0]
+              assert got==want,(rid,got,want)
+          # Known old false positives / multi-report contaminations.
+          negatives=['IMPORT-PBB-NAID-9670379-CASE','IMPORT-PBB-NAID-6792140-CASE','IMPORT-PBB-NAID-9072340-CASE','IMPORT-PBB-NAID-6964927-CASE','IMPORT-PBB-NAID-9617761-CASE','IMPORT-PBB-NAID-8702688-CASE','IMPORT-PBB-NAID-9316523-CASE']
+          for rid in negatives:
+              got=con.execute('select primary_ce from case_incidents where record_id=?',(rid,)).fetchone()[0]
+              assert got=='CE1',(rid,got)
+          print(json.dumps(r,indent=2))
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: UFO_ATLAS_PROJECT_BLUE_BOOK_PASS2_v0.2.0_REVIEWED_COMPLETE
+          path: |
+            release/UFO_ATLAS_PROJECT_BLUE_BOOK_PASS2_v0.2.0.zip
+            release/UFO_ATLAS_PROJECT_BLUE_BOOK_PASS2_v0.2.0.sqlite
+            release/PROJECT_BLUE_BOOK_PASS2_CE_INDEX.csv
+            release/REVIEWED_CLASSIFICATION_OVERRIDES.json
+            release/VALIDATION_REPORT.json
+            release/manifest.json
+            release/PACKAGE_SHA256.txt
+            release/README_FIRST.txt
+          if-no-files-found: error
+          retention-days: 90
