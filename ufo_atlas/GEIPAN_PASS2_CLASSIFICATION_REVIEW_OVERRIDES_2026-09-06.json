@@ -1,0 +1,52 @@
+{
+  "review_date": "2026-09-06",
+  "purpose": "Human/model-assisted semantic review corrections to the first-pass GEIPAN CE classifier. Apply after automated classification and before final release validation.",
+  "rule": "Encounter class describes reported event content, independent of GEIPAN A/B/C/D identification outcome. Highest applicable public class wins.",
+  "overrides": {
+    "1973-01-02356": {
+      "encounter_class": "CE2",
+      "confidence": "HIGH",
+      "basis": "reported ground at the object's stationary location was burned/blackened"
+    },
+    "1976-04-00300": {
+      "encounter_class": "CE2",
+      "confidence": "MEDIUM",
+      "basis": "reported television disturbances in the area contemporaneous with the luminous event"
+    },
+    "1976-10-00353": {
+      "encounter_class": "CE2",
+      "confidence": "MEDIUM",
+      "basis": "reported television interference contemporaneous with the encounter"
+    },
+    "1977-12-00468": {
+      "encounter_class": "CE2",
+      "confidence": "HIGH",
+      "basis": "television interference was reported at the same hours as the repeated object observations"
+    },
+    "1978-10-00550": {
+      "encounter_class": "CE2",
+      "confidence": "HIGH",
+      "basis": "moped stopped functioning during the close object observation and worked again after the object departed"
+    },
+    "1979-11-00683": {
+      "encounter_class": "CE2",
+      "confidence": "HIGH",
+      "basis": "sheep approximately 600 m away reportedly became highly agitated during the encounter"
+    },
+    "1980-03-00745": {
+      "encounter_class": "CE2",
+      "confidence": "HIGH",
+      "basis": "reported electrical event included an apparent ground strike/arc and a voltage drop observed by multiple people"
+    },
+    "1994-06-01360": {
+      "encounter_class": "CE2",
+      "confidence": "HIGH",
+      "basis": "gendarmes reported onboard communication equipment stopped operating during the close triangular-object encounter"
+    },
+    "1997-10-01485": {
+      "encounter_class": "CE3",
+      "confidence": "HIGH",
+      "basis": "a witness reported two silhouettes inside the glazed cabin of the close, silent craft"
+    }
+  }
+}

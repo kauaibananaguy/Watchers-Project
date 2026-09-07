@@ -1,0 +1,36 @@
+{
+  "project": "Watchers Project UFO Atlas",
+  "pass": "Pass 2 database upgrades",
+  "scope": "GEIPAN English normalization and CE1-CE5 encounter classification",
+  "completion_date_hst": "2026-09-06",
+  "source_case_count": 3381,
+  "pass2_case_count": 3381,
+  "encounter_class_census": {
+    "CE1": 3314,
+    "CE2": 48,
+    "CE3": 15,
+    "CE4": 4,
+    "CE5": 0
+  },
+  "classification_policy": "Highest applicable public encounter class wins. CE1-CE5 describes reported encounter content and does not assert that the report is true or unexplained. GEIPAN A/B/C/D remains separate source metadata.",
+  "narrative_language_policy": "English first, followed by the preserved French original.",
+  "metadata_language_policy": "English where translation/localization is appropriate; proper names remain proper names; source French retained in provenance.",
+  "semantic_review": "Automated classification followed by targeted semantic review of physical-effect, occupant/entity, and transport/abduction edge cases.",
+  "validation": {
+    "status": "PASS",
+    "sqlite_integrity": "ok",
+    "foreign_key_violations": 0,
+    "missing_english_fields": 0,
+    "missing_french_originals": 0,
+    "english_not_first": 0
+  },
+  "source_database_sha256": "13dde7b61e3d263e4766f2cfd614b19300a2447da219ffba1f262a6ddb0bd81a",
+  "pass2_database_sha256": "97f589fead5c751ebed29ed660e5373133e4c6fabd03edacf204d1b711872b6c",
+  "inner_package_filename": "UFO_ATLAS_GEIPAN_PASS2_v0.2.0.zip",
+  "inner_package_sha256": "e27238fa4c3ecb6502260bf3cbf2e05fdfc3fab41175c6616782f2164b26a9ec",
+  "github_actions_run_id": 34072496120,
+  "github_actions_artifact_id": 10001090322,
+  "github_actions_artifact_name": "UFO_ATLAS_GEIPAN_PASS2_v0.2.0_REVIEWED_COMPLETE",
+  "github_actions_artifact_sha256": "a777f15b366cbc76501bd9750a07d1d4b1fce4eb6c9ee20f26d99f1cd185018b",
+  "status": "COMPLETE"
+}

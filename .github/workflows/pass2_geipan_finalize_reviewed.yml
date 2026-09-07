@@ -1,0 +1,171 @@
+name: UFO Atlas Pass 2 Finalize — reviewed GEIPAN English + CE1-CE5
+
+on:
+  push:
+    branches:
+      - ufo-atlas-pass2-geipan-en-ce
+    paths:
+      - '.github/workflows/pass2_geipan_finalize_reviewed.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: geipan-pass2-finalize-reviewed
+  cancel-in-progress: false
+
+jobs:
+  finalize:
+    name: Wait for translation, apply semantic CE review, validate final database
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    env:
+      TRANSLATION_RUN_ID: '34071876259'
+      SOURCE_ARTIFACT_ID: '9952460380'
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Wait for 12-shard translation run
+        shell: bash
+        run: |
+          set -euo pipefail
+          while true; do
+            DATA=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${TRANSLATION_RUN_ID}")
+            STATUS=$(printf '%s' "$DATA" | jq -r '.status')
+            CONCLUSION=$(printf '%s' "$DATA" | jq -r '.conclusion // ""')
+            echo "translation run: status=${STATUS} conclusion=${CONCLUSION}"
+            if [ "$STATUS" = "completed" ]; then
+              test "$CONCLUSION" = "success"
+              break
+            fi
+            sleep 60
+          done
+
+      - name: Download completed translation shards
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p shard_downloads shards
+          gh run download "$TRANSLATION_RUN_ID" --repo "$GITHUB_REPOSITORY" --pattern 'pass2-v3-shard-*' --dir shard_downloads
+          find shard_downloads -type f -name '*.jsonl' -exec cp {} shards/ \;
+          test "$(find shards -maxdepth 1 -type f -name '*.jsonl' | wc -l)" -eq 12
+          test "$(cat shards/*.jsonl | wc -l)" -eq 3381
+
+      - name: Apply reviewed CE classification overrides
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, pathlib
+          override_path=pathlib.Path('ufo_atlas/GEIPAN_PASS2_CLASSIFICATION_REVIEW_OVERRIDES_2026-09-06.json')
+          spec=json.loads(override_path.read_text(encoding='utf-8'))
+          overrides=spec['overrides']
+          seen=set()
+          for path in sorted(pathlib.Path('shards').glob('*.jsonl')):
+              out=[]
+              for line in path.read_text(encoding='utf-8').splitlines():
+                  if not line.strip():
+                      continue
+                  r=json.loads(line)
+                  cid=r.get('source_case_id')
+                  if cid in overrides:
+                      o=overrides[cid]
+                      r['encounter_class']=o['encounter_class']
+                      r['encounter_class_confidence']=o['confidence']
+                      r['encounter_class_basis']=o['basis']
+                      r['encounter_classifier_version']=r.get('encounter_classifier_version','') + '+SEMANTIC_REVIEW_2026-09-06'
+                      seen.add(cid)
+                  out.append(json.dumps(r,ensure_ascii=False))
+              path.write_text('\n'.join(out)+'\n',encoding='utf-8')
+          missing=set(overrides)-seen
+          if missing:
+              raise SystemExit(f'override cases not found: {sorted(missing)}')
+          print(f'applied {len(seen)} reviewed encounter-class overrides')
+          PY
+
+      - name: Download verified repaired GEIPAN source snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p source_outer source
+          curl -fL \
+            -H 'Accept: application/vnd.github+json' \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${SOURCE_ARTIFACT_ID}/zip" \
+            -o source_artifact.zip
+          unzip -q source_artifact.zip -d source_outer
+          INNER=$(find source_outer -maxdepth 2 -type f -name 'GEIPAN_CASE_PAGE_SOURCE_SNAPSHOT_v0.2.1_REPAIRED.zip' -print -quit)
+          test -n "$INNER"
+          unzip -q "$INNER" -d source
+          test -f source/GEIPAN_CASE_PAGE_SOURCE_SNAPSHOT_v0.2.1_REPAIRED.sqlite
+
+      - name: Build reviewed successor database
+        shell: bash
+        run: |
+          set -euo pipefail
+          python ufo_atlas/ingestion/geipan/pass2/build_pass2_database_v2.py \
+            --source-db source/GEIPAN_CASE_PAGE_SOURCE_SNAPSHOT_v0.2.1_REPAIRED.sqlite \
+            --jsonl-dir shards \
+            --out-dir release
+
+      - name: Independent final validation and reviewed-case assertions
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json, pathlib, sqlite3
+          report=json.loads(pathlib.Path('release/VALIDATION_REPORT.json').read_text(encoding='utf-8'))
+          assert report['status']=='PASS', report
+          assert report['pass2_case_count']==3381, report
+          assert report['foreign_key_violations']==0, report
+          assert report['missing_english_fields']==0, report
+          assert report['missing_french_originals']==0, report
+          assert report['english_not_first']==0, report
+          spec=json.loads(pathlib.Path('ufo_atlas/GEIPAN_PASS2_CLASSIFICATION_REVIEW_OVERRIDES_2026-09-06.json').read_text(encoding='utf-8'))
+          con=sqlite3.connect('release/UFO_ATLAS_GEIPAN_PASS2_v0.2.0.sqlite')
+          for cid,o in spec['overrides'].items():
+              row=con.execute('select encounter_class,encounter_class_confidence,encounter_class_basis from case_pass2 where source_case_id=?',(cid,)).fetchone()
+              assert row is not None, cid
+              assert row[0]==o['encounter_class'], (cid,row,o)
+              assert row[1]==o['confidence'], (cid,row,o)
+              assert row[2]==o['basis'], (cid,row,o)
+          con.close()
+          print(json.dumps(report,indent=2))
+          print('reviewed override assertions: PASS')
+          PY
+
+      - name: Add final review receipt
+        shell: bash
+        run: |
+          cp ufo_atlas/GEIPAN_PASS2_CLASSIFICATION_REVIEW_OVERRIDES_2026-09-06.json release/CLASSIFICATION_REVIEW_OVERRIDES_2026-09-06.json
+          cat > release/FINAL_REVIEW_NOTE.txt <<'EOF'
+          WATCHERS PROJECT UFO ATLAS — GEIPAN PASS 2 FINAL REVIEW
+          English-normalized metadata where appropriate.
+          Main case narrative: English first, French original preserved second.
+          Public encounter classification: CE1 through CE5 only.
+          Automated classification was followed by semantic review of edge cases involving physical effects and occupants.
+          GEIPAN A/B/C/D remains separate source metadata and does not control the Atlas encounter class.
+          EOF
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: UFO_ATLAS_GEIPAN_PASS2_v0.2.0_REVIEWED_COMPLETE
+          path: |
+            release/UFO_ATLAS_GEIPAN_PASS2_v0.2.0.zip
+            release/UFO_ATLAS_GEIPAN_PASS2_v0.2.0.sqlite
+            release/GEIPAN_PASS2_CASE_INDEX.csv
+            release/VALIDATION_REPORT.json
+            release/manifest.json
+            release/PACKAGE_SHA256.txt
+            release/README_FIRST.txt
+            release/CLASSIFICATION_REVIEW_OVERRIDES_2026-09-06.json
+            release/FINAL_REVIEW_NOTE.txt
+          if-no-files-found: error
+          retention-days: 30
