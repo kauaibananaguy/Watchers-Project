@@ -1,0 +1,1 @@
+GEIPAN Pass 2 requested: translate 3,381 case narratives to English, retain French originals after English, normalize metadata to English as appropriate, and classify public encounter level CE1-CE5. Triggered 2026-09-06 HST.
