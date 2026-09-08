@@ -21,7 +21,7 @@ jobs:
       - name: Checkout staging branch
         uses: actions/checkout@v4
 
-      - name: Acquire BodyParts3D cardiovascular OBJ source set
+      - name: Acquire BodyParts3D reference-only set
         shell: bash
         run: |
           set -euo pipefail
@@ -35,69 +35,46 @@ jobs:
           python - <<'PY'
           import json, pathlib, shutil, csv, hashlib
           root = pathlib.Path('work/bp3d')
-          out = pathlib.Path('work/source/bodyparts3d_cv')
+          out = pathlib.Path('work/source/BLOCKED_REFERENCE_ONLY_bodyparts3d_cv')
           out.mkdir(parents=True, exist_ok=True)
           data = json.loads((root/'data/anatomy_data_simple_refined.json').read_text(encoding='utf-8'))
-          # The mirror groups exact BodyParts3D FJ element meshes by anatomical system.
           cv = data.get('cardiovascular', [])
-          if not cv:
-              raise SystemExit('No cardiovascular group found in anatomy_data_simple_refined.json')
-          rows=[]
-          missing=[]
-          seen=set()
+          rows=[]; missing=[]; seen=set()
           for rec in cv:
               fj=rec['id']
-              if fj in seen:
-                  continue
+              if fj in seen: continue
               seen.add(fj)
               src=root/'isa_BP3D_4.0_obj_99'/f'{fj}.obj'
-              if not src.exists():
-                  missing.append(fj)
-                  continue
-              dst=out/src.name
-              shutil.copy2(src,dst)
-              b=dst.read_bytes()
-              rows.append({
-                  'fj_id':fj,
-                  'name':rec.get('nameEn',''),
-                  'bytes':len(b),
-                  'sha256':hashlib.sha256(b).hexdigest(),
-              })
+              if not src.exists(): missing.append(fj); continue
+              dst=out/src.name; shutil.copy2(src,dst); b=dst.read_bytes()
+              rows.append({'fj_id':fj,'name':rec.get('nameEn',''),'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest()})
           for name in ['isa_parts_list_e.txt','isa_parts_list.txt','isa_element_parts.txt','anatomy_data_simple_refined.json']:
               shutil.copy2(root/'data'/name, pathlib.Path('work/source')/name)
-          with open('work/source/bodyparts3d_cv_manifest.csv','w',newline='',encoding='utf-8') as f:
-              w=csv.DictWriter(f,fieldnames=['fj_id','name','bytes','sha256'])
-              w.writeheader(); w.writerows(rows)
-          pathlib.Path('work/source/bodyparts3d_missing.txt').write_text('\n'.join(missing),encoding='utf-8')
-          print('cardiovascular unique listed:',len(seen))
-          print('copied OBJ:',len(rows))
-          print('missing OBJ:',len(missing))
-          if missing:
-              raise SystemExit('Missing BodyParts3D cardiovascular OBJ files: '+','.join(missing[:20]))
+          with open('work/source/bodyparts3d_reference_manifest.csv','w',newline='',encoding='utf-8') as f:
+              w=csv.DictWriter(f,fieldnames=['fj_id','name','bytes','sha256']); w.writeheader(); w.writerows(rows)
+          pathlib.Path('work/source/BODYPARTS3D_PRODUCTION_BLOCK.txt').write_text(
+              'REFERENCE ONLY. DO NOT USE TO CREATE, FIT, SCULPT, REGISTER, OR SHIP MHA PRODUCTION GEOMETRY. '+
+              'The controlling MHA source policy blocks BodyParts3D because the exact Release 4.0 OBJ files carry CC Attribution-ShareAlike 2.1 Japan.\n',encoding='utf-8')
+          print('reference-only OBJ copied:',len(rows),'missing:',len(missing))
           PY
 
-      - name: Acquire HuBMAP HRA male cardiovascular GLBs
+      - name: Acquire HuBMAP HRA production-eligible male assets
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p work/source/hra
-          curl -fL --retry 4 --retry-delay 2 "$HRA_REPO_RAW/VH_M_Heart.glb" -o work/source/hra/VH_M_Heart.glb
-          curl -fL --retry 4 --retry-delay 2 "$HRA_REPO_RAW/VH_M_Blood_Vasculature.glb" -o work/source/hra/VH_M_Blood_Vasculature.glb
-          curl -fL --retry 4 --retry-delay 2 "$HRA_REPO_RAW/ASCT-B_3D_Models_Mapping.csv" -o work/source/hra/ASCT-B_3D_Models_Mapping.csv
+          for f in VH_M_Heart.glb VH_M_Blood_Vasculature.glb VH_M_Pelvis.glb VH_M_Lung.glb VH_M_Prostate.glb ASCT-B_3D_Models_Mapping.csv; do
+            curl -fL --retry 4 --retry-delay 2 "$HRA_REPO_RAW/$f" -o "work/source/hra/$f"
+          done
           python - <<'PY'
           import pathlib, hashlib, csv
           root=pathlib.Path('work/source/hra')
-          expected={
-            'VH_M_Heart.glb':4071500,
-            'VH_M_Blood_Vasculature.glb':7436204,
-            'ASCT-B_3D_Models_Mapping.csv':272624,
-          }
+          expected={'VH_M_Heart.glb':4071500,'VH_M_Blood_Vasculature.glb':7436204,'VH_M_Pelvis.glb':1348060,'VH_M_Lung.glb':6355840,'VH_M_Prostate.glb':4086328,'ASCT-B_3D_Models_Mapping.csv':272624}
           rows=[]
           for p in root.iterdir():
               if p.is_file():
                   b=p.read_bytes()
-                  if p.name in expected and len(b)!=expected[p.name]:
-                      raise SystemExit(f'Unexpected byte size for {p.name}: {len(b)} != {expected[p.name]}')
+                  if p.name in expected and len(b)!=expected[p.name]: raise SystemExit(f'Unexpected byte size {p.name}: {len(b)} != {expected[p.name]}')
                   rows.append({'file':p.name,'bytes':len(b),'sha256':hashlib.sha256(b).hexdigest()})
           with open('work/source/hra_manifest.csv','w',newline='',encoding='utf-8') as f:
               w=csv.DictWriter(f,fieldnames=['file','bytes','sha256']); w.writeheader(); w.writerows(rows)
@@ -110,19 +87,19 @@ jobs:
           cat > work/source/SOURCE_PROVENANCE.md <<'EOF'
           # MHA cardiovascular geometry source staging
 
-          - BodyParts3D mirror transport: `jixiangying/anatomy`, pinned commit `be67a977abe25a36f59793fda86a506618fd4d27`.
-          - BodyParts3D semantic authority remains the official Release 4.0 FMA/BP tables copied into this bundle.
-          - Exact Release 4.0 OBJ files contain their own embedded historical license notice; preserve it and adjudicate redistribution accordingly.
-          - HuBMAP HRA male heart and male blood-vasculature GLBs: `hubmapconsortium/ccf-releases`, v1.2 model paths.
-          - HRA files are staged unchanged; byte counts and SHA-256 hashes are recorded in `hra_manifest.csv`.
+          ## Production-eligible source lane
+          HuBMAP HRA v1.2 male heart, male blood vasculature, pelvis, lung, and prostate assets. The pelvis/lung/prostate are registration landmarks/context, not cardiovascular content.
+
+          ## Blocked reference lane
+          BodyParts3D Release 4.0 mirror at pinned commit `be67a977abe25a36f59793fda86a506618fd4d27`. Exact OBJ files embed a CC Attribution-ShareAlike 2.1 Japan notice. The controlling MHA source policy explicitly blocks share-alike sources, including temporary production-pipeline use. These files are quarantined as provenance/reference only and MUST NOT contribute vertices, transforms, fitted paths, sculpting, or derivatives to production geometry.
           EOF
-          sha256sum work/source/hra/* work/source/bodyparts3d_cv/*.obj > work/source/all_source_sha256.txt
+          sha256sum work/source/hra/* > work/source/hra_source_sha256.txt
           du -sh work/source
 
       - name: Upload cardiovascular geometry source artifact
         uses: actions/upload-artifact@v4
         with:
-          name: MHA_CARDIOVASCULAR_GEOMETRY_SOURCES_2026-09-07
+          name: MHA_CARDIOVASCULAR_GEOMETRY_SOURCES_WITH_REGISTRATION_2026-09-07
           path: work/source
           if-no-files-found: error
           retention-days: 7
