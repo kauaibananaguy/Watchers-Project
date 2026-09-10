@@ -1,0 +1,51 @@
+name: Recover Atlas CE345 priority files
+on:
+  push:
+    branches: [atlas-rc9-priority-media-recovery]
+    paths: ['.github/workflows/atlas_rc9_priority_recovery.yml']
+permissions:
+  contents: read
+  actions: read
+jobs:
+  recover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Extract and verify two preserved files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p output
+          python - <<'PY'
+          import os, pathlib, subprocess, zipfile, hashlib, json
+          jobs=[
+            (10037410864, 'fd9d35544e9821e3b404e23a9b40efa0202fc962a5f885761124a1d142d0e407', 'blobs/7f8ded993d625e5f5aa764df5ab1ad6d481f9e91aac5b1bdf48446b488f5fc77.pdf'),
+            (10037715529, 'f9c541feff9e1797c7d61fe4714ca78f58c3548183896a6ca3b3465565ac4734', 'blobs/7a8db539375f9edee6f87b7f0170b068115399054d0929ab6cfcf2ebfb22157a.7z')]
+          results=[]
+          for artifact, expected_archive_hash, member in jobs:
+              archive=pathlib.Path('source.zip')
+              with archive.open('wb') as out:
+                  subprocess.run(['gh','api',f'repos/{os.environ["REPO"]}/actions/artifacts/{artifact}/zip'],stdout=out,check=True)
+              with archive.open('rb') as src:
+                  assert hashlib.file_digest(src,'sha256').hexdigest()==expected_archive_hash
+              with zipfile.ZipFile(archive) as z:
+                  info=z.getinfo(member)
+                  assert info.file_size<2000000
+                  data=z.read(info)
+              target=pathlib.Path('output')/pathlib.Path(member).name
+              assert hashlib.sha256(data).hexdigest()==target.stem
+              target.write_bytes(data)
+              results.append(dict(artifact_id=artifact,source_member=member,sha256=target.stem,bytes=len(data)))
+              archive.unlink()
+          pathlib.Path('output/RECOVERY_MANIFEST.json').write_text(json.dumps(results,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: UFO_ATLAS_RC9_TWO_PRIORITY_FILES_VERIFIED
+          path: output/
+          retention-days: 90
+          if-no-files-found: error
+
