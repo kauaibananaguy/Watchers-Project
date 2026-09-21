@@ -1,0 +1,4 @@
+*.case.json
+*.sqlite
+assets/
+__pycache__/
